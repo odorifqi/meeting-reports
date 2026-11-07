@@ -524,8 +524,12 @@ function edGaps(e) {
     }
     if (b - cur > e.minGap) out.push([cur, b]);
   });
-  return out.filter(g => !e.gapSkip[g[0].toFixed(1)]);
+  // a stretch that was already sent to Whisper again stays hidden: what is left there is
+  // sound Whisper cannot read (music, noise, very quiet speech), not a new gap
+  const tried = e.gapTried || [];
+  return out.filter(g => !e.gapSkip[g[0].toFixed(1)] && !tried.some(([x, y]) => g[0] >= x - 1 && g[1] <= y + 1));
 }
+const normTxt = t => (t || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 const edDirty = e => canon(cleanSegs(e.segs), e.parts) !== e.baseKey;
 // an inserted segment that was never typed into is not content
 const cleanSegs = segs => segs.filter(s => !(s.manual && !(s.text || '').trim()));
@@ -1471,16 +1475,25 @@ const A = {
       const r = await post(`/api/meetings/${encodeURIComponent(mid)}/retranscribe`, { start: a, end: b });
       S.gapBusy = null;
       if (S.ed !== e) return;
-      if (!r.segments.length) { e.gapSkip[a.toFixed(1)] = true; render(); toast('Whisper tidak menemukan ucapan di bagian ini. Sisipkan manual bila perlu.', null, 'info'); return; }
-      const before = clone(e.segs), sel = e.sel;
-      r.segments.forEach(x => {
+      (e.gapTried = e.gapTried || []).push([a, b]);
+      // drop what is already in the transcript nearby (same words within 3 s), so a second
+      // try or Whisper re-hearing a neighbouring line never adds a duplicate
+      const fresh = r.segments.filter(x => !e.segs.some(s => normTxt(s.text) === normTxt(x.text) && s.start <= x.end + 3 && s.end >= x.start - 3));
+      if (!fresh.length) {
+        render();
+        toast(r.segments.length ? 'Whisper hanya menemukan kalimat yang sudah ada di transkrip. Tidak ada yang ditambahkan; dengarkan lalu sisipkan manual bila perlu.' : 'Whisper tidak menemukan ucapan yang bisa dibaca di bagian ini. Dengarkan, lalu sisipkan manual bila perlu.', null, 'info');
+        return;
+      }
+      const before = clone(e.segs), sel = e.sel, triedBefore = e.gapTried.slice(0, -1);
+      fresh.forEach(x => {
         let pos = e.segs.findIndex(s => s.start > x.start); if (pos < 0) pos = e.segs.length;
         insertSeg(pos, x.start, x.end, x.text, { gap_fill: true });
       });
-      e.sel = e.segs.findIndex(s => s.gap_fill && s.start >= r.segments[0].start - 0.01);
+      e.sel = e.segs.findIndex(s => s.gap_fill && s.start >= fresh[0].start - 0.01);
       edTouched(true);
       const el2 = $(`#sg-${e.sel}`); if (el2) el2.scrollIntoView({ block: 'center' });
-      toast(`${r.segments.length} segmen ditambahkan dari celah. Periksa, lalu Simpan.`, () => { e.segs = before; e.sel = sel; edTouched(true); });
+      const skipped = r.segments.length - fresh.length;
+      toast(`${fresh.length} segmen ditambahkan dari celah${skipped ? ` (${skipped} kalimat yang sudah ada dilewati)` : ''}. Periksa, lalu Simpan.`, () => { e.segs = before; e.sel = sel; e.gapTried = triedBefore; edTouched(true); });
     } catch (err) { S.gapBusy = null; render(); fail(err); }
   },
   gapIns(el) {

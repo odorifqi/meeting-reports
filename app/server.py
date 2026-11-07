@@ -27,7 +27,7 @@ import jobs as jobs_mod
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
@@ -500,13 +500,17 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             raise HTTPException(500, f"Transkrip ulang gagal ({type(exc).__name__})")
         finally:
             jb.whisper_lock.release()
-        out = []
+        # the 1 s padding on each side lets Whisper hear whole words at the edges, but it
+        # also hears the neighbouring segments again: keep only speech centred in the gap
+        out, outside = [], 0
         for s in segs or []:
             st_, en = lo + float(s["start"]), lo + float(s["end"])
-            if a - 0.5 <= (st_ + en) / 2 <= b + 0.5:
-                out.append({"start": round(max(st_, a - 1.0), 2), "end": round(en, 2), "text": s["text"],
-                            "low_words": s.get("low_words") or []})
-        return {"segments": out}
+            if a <= (st_ + en) / 2 <= b:
+                out.append({"start": round(max(st_, a - 1.0), 2), "end": round(min(en, b + 1.0), 2),
+                            "text": s["text"], "low_words": s.get("low_words") or []})
+            else:
+                outside += 1
+        return {"segments": out, "outside": outside}
 
     @app.put("/api/meetings/{mid}/draft")
     def put_draft(mid: str, body: dict = Body(...)):

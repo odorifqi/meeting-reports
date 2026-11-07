@@ -547,3 +547,19 @@ def test_migrate_output_root(tmp_path):
     (old / "2026-11-06 0900 - Lain").mkdir()
     assert core.migrate_output_root(old, new) == ["a"]
     assert (new / "a").is_dir() and (old / "2026-11-06 0900 - Lain").is_dir()
+
+
+def test_retranscribe_drops_padding_echo(env):
+    """Bug report: the 1 s padding made Whisper return the neighbouring line again
+    ("Terima kasih" just before the gap), which the editor then added as a new segment."""
+    c, st, jb, src = env
+    mid = c.post("/api/meetings", json={"source_path": str(src), "title": "Celah tepi"}).json()["id"]
+    wait(jb)
+    jb.transcribe_chunk = lambda audio, lang, prompt, repo, wc=True: [
+        {"start": 0.0, "end": 0.7, "text": "Terima kasih", "low_words": []},     # in the left padding
+        {"start": 4.0, "end": 6.0, "text": "isi celah", "low_words": []},
+        {"start": 10.6, "end": 11.0, "text": "Terima kasih.", "low_words": []},   # in the right padding
+    ]
+    r = c.post(f"/api/meetings/{mid}/retranscribe", json={"start": 3.0, "end": 12.0}).json()
+    assert [s["text"] for s in r["segments"]] == ["isi celah"] and r["outside"] == 2
+    assert r["segments"][0]["start"] == 6.0
