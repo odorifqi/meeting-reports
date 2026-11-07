@@ -1,6 +1,8 @@
 mlx-whisper>=0.4
 anthropic>=0.40
-tkinterdnd2>=0.4.2
 python-docx>=1.1
 numpy
 huggingface_hub
+fastapi>=0.110
+uvicorn>=0.29
+pywebview>=5.0

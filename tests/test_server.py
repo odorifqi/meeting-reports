@@ -73,6 +73,7 @@ def test_security(env):
     assert c.get("/api/state", headers={"host": "evil.com:8765"}).status_code == 403
     assert c.post("/api/vocabulary", json={"term": "x"}, headers={"origin": "http://evil.com"}).status_code == 403
     assert c.get("/").status_code == 401
+    assert TestClient(c.app, base_url="http://127.0.0.1:8765").get("/api/health").json()["app"] == "meeting-notes"
     r = TestClient(c.app, base_url="http://127.0.0.1:8765").get(f"/?t={TOKEN}")
     assert r.status_code == 200 and server.COOKIE in r.cookies
     assert "sk-ant" not in c.get("/api/settings").text

@@ -1,65 +1,85 @@
-# Meeting Notes
+# Meeting Notes v1.2
 
-Aplikasi Mac untuk mengubah rekaman rapat menjadi transkrip dan laporan.
+Aplikasi Mac untuk rekaman rapat: transkrip lokal, editor transkrip, penanda peserta, dan laporan rapat. v1.2 memakai server lokal (FastAPI di `127.0.0.1:8765`) dengan tampilan HTML di jendela Mac sendiri (pywebview, WKWebView).
 
-## Alur kerja
+## Yang tetap di Mac ini
 
-1. Tarik file rekaman (dari Voice Memos, QuickTime, dll.) ke jendela aplikasi.
-2. Bagian hening dibuang otomatis (bisa dimatikan).
-3. Audio ditranskrip **di laptop** dengan Whisper large-v3-turbo (MLX). Audio tidak dikirim ke mana pun.
-4. Muncul konfirmasi: **Buat Ringkasan** (kirim transkrip ke Claude API) atau **Transkrip Saja**.
-5. Hasil tersimpan di `~/Documents/Meeting Notes/<tanggal> - <nama file>/`:
-   - `Transkrip.txt`: teks lengkap dengan timestamp. Timestamp mengacu ke rekaman asli, bukan ke audio yang sudah dibersihkan.
-   - `Audio bersih.m4a`: rekaman tanpa bagian hening (opsional).
-   - `Ringkasan.md` dan `Ringkasan.docx`: ringkasan, keputusan, action item, isu terbuka.
+- Audio dan transkripsi Whisper (mlx-whisper large-v3-turbo) 100% lokal.
+- Server hanya mendengar di `127.0.0.1`, memakai token sesi dan cek Origin. Tidak bisa dibuka dari jaringan.
+- Teks baru dikirim ke Anthropic setelah Anda konfirmasi (ringkasan atau saran Claude), dan selalu lewat filter lokal dulu: nomor rekening, NIK, nomor HP, nomor kartu, NPWP, email, dan kata sensitif Anda diganti token seperti `‹REKENING_1›`, segmen bertanda Rahasia tidak dikirim, lalu token dipulihkan di Mac ini.
+- API key ada di Keychain macOS dan tidak pernah dikirim ke tampilan.
+- Log tidak pernah berisi isi transkrip.
 
-Kalau memilih "Transkrip Saja", ringkasan masih bisa dibuat nanti lewat tombol **Buat Ringkasan**, selama jendela aplikasi belum ditutup.
+## Instalasi (pemakaian harian)
 
-## Instalasi
-
-Butuh: Mac Apple Silicon, macOS 13+, [Homebrew](https://brew.sh), ruang kosong ±4 GB.
+Butuh Mac Apple Silicon, macOS 13+, [Homebrew](https://brew.sh), ruang kosong sekitar 4 GB.
 
 ```bash
-cd ~/Downloads/meeting-notes
-bash install.sh
+cd ~/meeting-report
+./install.sh
 ```
 
-Installer memasang ffmpeg dan uv lewat Homebrew, menyiapkan Python 3.12, lalu mengunduh model Whisper (~1,6 GB). Aplikasinya dibuat di `~/Applications/Meeting Notes.app`.
+Installer memasang ffmpeg dan uv, menyalin aplikasi ke `~/Library/Application Support/MeetingNotes/app`, menyimpan v1 sebagai cadangan di `app-v1/`, menyiapkan Python 3.12, dan membuat `~/Applications/Meeting Notes.app`. Model Whisper yang sudah terunduh dipakai ulang.
 
-## API key Claude
+Buka **Meeting Notes** dari Finder > Applications. Hasil v1 di `~/Documents/Meeting Notes` otomatis ikut tampil di Riwayat (file v1 tidak diubah).
 
-Buat key di https://console.anthropic.com (perlu saldo/billing). Saat pertama kali membuat ringkasan, aplikasi meminta key dan menyimpannya di macOS Keychain. Untuk mengganti key, pakai tombol **API Key…**.
+## Menjalankan dari repo (pengembangan)
 
-## Pengaturan
-
-| Pengaturan | Default | Keterangan |
-|---|---|---|
-| Buang bagian hening | aktif, 2 detik | Jeda lebih lama dari ini dipotong. Sisa 0,4 detik di tiap sisi supaya kata tidak terpotong. Ambang suara menyesuaikan otomatis dengan tingkat bising ruangan. |
-| Simpan audio bersih | aktif | Disimpan dalam kualitas suara rapat (16 kHz mono). |
-| Bahasa rapat | Bahasa Indonesia | Pilih "Deteksi otomatis" kalau rapat campur bahasa. |
-| Istilah/nama penting | kosong | Contoh: `BRICORE, i-SDM, RAYAFIN, Jagat Raya`. Membantu Whisper mengeja istilah dengan benar. |
-
-Model Claude bisa diganti di `~/Library/Application Support/MeetingNotes/config.json` (key `claude_model`).
-
-## Voice Memos
-
-Tombol **Dari Voice Memos…** membuka folder rekaman Voice Memos. Kalau macOS menolak akses ke folder itu, ada dua cara:
-- Di Voice Memos, klik kanan rekaman lalu pilih **Share > Save to Files** (atau drag ke Desktop), lalu tarik file itu ke aplikasi.
-- Atau beri izin **Full Disk Access** untuk "Meeting Notes" di System Settings > Privacy & Security.
-
-## Batasan
-
-- Belum ada pemisahan pembicara (speaker diarization). Ringkasan hanya menyebut nama yang terucap.
-- Transkripsi 1 jam rapat butuh waktu kira-kira beberapa menit di M5. Rekaman pertama lebih lama karena model dimuat.
-- Ringkasan lewat Claude API mengirim teks transkrip ke Anthropic. Pastikan sesuai kebijakan data kantor.
-
-## Masalah
-
-Log error: `~/Library/Application Support/MeetingNotes/logs/error.log`
-
-Hapus aplikasi:
 ```bash
-rm -rf ~/Applications/"Meeting Notes.app" ~/Library/Application\ Support/MeetingNotes
-rm -rf ~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo
-security delete-generic-password -s MeetingNotes -a anthropic-api-key
+./run.sh dev    # server dengan auto-reload, dibuka di Chrome (mirip "npm run dev")
+./run.sh app    # jendela Mac memakai kode di repo ini
+./run.sh test   # tes otomatis
 ```
+
+Mode dev memakai data asli di `~/Documents/Meeting Notes`. Untuk mencoba dengan folder terpisah:
+
+```bash
+MN_OUTPUT_DIR=~/Desktop/mn-uji ./run.sh dev
+```
+
+## Alur
+
+1. **Rapat Baru**: pilih atau tarik rekaman, isi judul, bahasa, buang hening, istilah penting, dan (opsional) daftar peserta. Urutan peserta = tombol 1 sampai 9 di editor.
+2. **Progres**: transkripsi per bagian ±10 menit, persen, perkiraan sisa waktu, log. Jendela boleh ditutup. Kalau gagal, coba lagi melanjutkan dari bagian yang gagal.
+3. **Tinjau transkrip**: edit teks, cari dan ganti, gabung dan pecah segmen, tandai rahasia, putar potongan suara per segmen (Spasi), tandai pembicara (1 sampai 9, 0 hapus), terima atau tolak saran lokal. Draf tersimpan otomatis.
+4. **Simpan**: membuat versi 1. Lalu pilih **Buat Ringkasan**, **Transkrip Saja**, atau **Minta saran Claude dulu** (opsional, rapat diberi tanda ✦ Disarankan Claude).
+5. **Edit lagi kapan saja**: versi hanya bertambah kalau isinya benar berubah. Kalau sudah ada ringkasan, aplikasi menawarkan **Perbarui ringkasan**; kalau ditunda, ringkasan diberi tanda usang dan `Ringkasan.md`/`.docx` diberi baris ⚠ di atasnya.
+6. **Bandingkan**: diff berdampingan atau inline, per kata, untuk transkrip (asli Whisper, simpan terakhir, versi mana pun) dan ringkasan. Kanan otomatis versi terbaru; bila dua versi lama dibandingkan, tombol Pulihkan ada di kiri dan kanan. Memulihkan selalu membuat versi baru.
+
+Warna diff aman untuk buta warna: dihapus merah tua dengan tanda −, ditambah biru/indigo dengan tanda +, kata yang berubah diberi latar lebih pekat dan kotak.
+
+## Isi folder per rapat
+
+```
+~/Documents/Meeting Notes/2026-11-05 1347 - Judul/
+  Transkrip.txt          transkrip versi terbaru (dengan nama peserta)
+  Transkrip asli.txt     hasil Whisper, tidak pernah diubah
+  Ringkasan.md / .docx   ringkasan terbaru (baris ⚠ bila usang)
+  Audio bersih.m4a       opsional
+  meeting.json           status, peserta, daftar ringkasan, log kirim
+  versions/rev-N.json    setiap versi transkrip (rev-0 = Whisper)
+  summaries/sum-N.md     setiap versi ringkasan
+  draft.json             draf editor yang belum disimpan
+```
+
+Rekaman asli tidak disalin; aplikasi memutarnya dari lokasi awal (misalnya Voice Memos). Rekaman yang ditarik ke jendela disalin ke folder rapat sebagai `Rekaman asli.*`.
+
+## Struktur kode
+
+```
+app/core.py      audio, buang hening, Whisper per bagian, format Transkrip.txt, Claude, .docx
+app/store.py     folder rapat, versi (hash isi), ringkasan, baris usang, migrasi v1
+app/filters.py   F15 filter data sensitif dan pratinjau kirim
+app/suggest.py   F14 saran kata lokal dan saran Claude
+app/jobs.py      satu worker: transkripsi, ringkasan, saran Claude; event SSE
+app/server.py    FastAPI + keamanan lokal
+app/main.py      launcher .app (server + jendela pywebview)
+app/static/      UI (HTML, CSS, JS tanpa build step)
+tests/           pytest; tests/demo_server.py menjalankan UI dengan Whisper dan Claude palsu
+```
+
+## Kalau ada masalah
+
+- Log server: `~/Library/Application Support/MeetingNotes/logs/server.log`
+- Server tetap jalan selama ada proses, lalu berhenti sendiri 30 menit setelah jendela ditutup.
+- Kembali ke v1 sementara: `~/Library/Application Support/MeetingNotes/venv/bin/python ~/Library/Application\ Support/MeetingNotes/app-v1/main.py`

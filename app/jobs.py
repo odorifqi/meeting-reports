@@ -81,7 +81,7 @@ def postprocess_summary(md: str, meta: dict, version: dict, model: str, send: di
     tag_txt = (f"{tagged} dari {len(segs)} segmen ditandai" if parts else "tanpa penanda peserta")
     head = [lines[0], ""]
     if date:
-        head.append(date)
+        head += [date, ""]
     head.append(f"_Dibuat dari transkrip versi {rev} · {tag_txt}_")
     body = lines[1:]
     while body and not body[0].strip():

@@ -27,7 +27,7 @@ import jobs as jobs_mod
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
@@ -79,7 +79,7 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             origin = request.headers.get("origin")
             if origin and origin not in origins:
                 return JSONResponse({"detail": "Origin tidak diizinkan"}, status_code=403)
-        if path.startswith("/api/"):
+        if path.startswith("/api/") and path != "/api/health":
             given = request.headers.get("x-mn-token") or request.cookies.get(COOKIE)
             if not given or not secrets.compare_digest(given, tok):
                 return JSONResponse({"detail": "Sesi tidak valid. Buka lewat Meeting Notes."}, status_code=401)
@@ -183,6 +183,11 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             raise HTTPException(400, "File tidak ditemukan")
         return {"path": str(p), "name": p.name, "size": p.stat().st_size,
                 "audio": p.suffix.lower() in AUDIO_EXT}
+
+    @app.post("/api/file-info")
+    def file_info_ep(body: dict = Body(...)):
+        """File opened from Finder ("Open with Meeting Notes")."""
+        return file_info(Path(str(body.get("path") or "")).expanduser())
 
     @app.post("/api/upload")
     async def upload(request: Request):

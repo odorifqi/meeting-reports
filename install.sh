@@ -1,6 +1,7 @@
 #!/bin/bash
-# Installer Meeting Notes untuk macOS (Apple Silicon).
-# Jalankan dari Terminal:  bash install.sh
+# Installer Meeting Notes v1.2 untuk macOS (Apple Silicon).
+# Jalankan dari Terminal di folder repo:  ./install.sh
+# Aman diulang. Versi v1 (Tkinter) disimpan sebagai cadangan di app-v1/.
 set -euo pipefail
 
 APP_NAME="Meeting Notes"
@@ -29,9 +30,18 @@ say "Pasang ffmpeg dan uv (kalau belum ada)"
 command -v ffmpeg >/dev/null 2>&1 || brew install ffmpeg
 command -v uv >/dev/null 2>&1 || brew install uv
 
-say "Salin aplikasi ke $SUPPORT"
+say "Hentikan server Meeting Notes yang sedang jalan (kalau ada)"
+pkill -f "$SUPPORT/app/server.py" 2>/dev/null || true
+
+mkdir -p "$SUPPORT"
+if [[ -f "$SUPPORT/app/main.py" ]] && grep -q "tkinter" "$SUPPORT/app/main.py" && [[ ! -d "$SUPPORT/app-v1" ]]; then
+  say "Simpan aplikasi v1 sebagai cadangan di $SUPPORT/app-v1"
+  mv "$SUPPORT/app" "$SUPPORT/app-v1"
+fi
+
+say "Salin aplikasi ke $SUPPORT/app"
 mkdir -p "$SUPPORT/app"
-cp -R "$SRC_DIR/app/." "$SUPPORT/app/"
+rsync -a --delete --exclude "__pycache__" "$SRC_DIR/app/" "$SUPPORT/app/"
 
 say "Siapkan Python 3.12 dan library"
 if [[ ! -x "$SUPPORT/venv/bin/python" ]]; then
@@ -39,11 +49,7 @@ if [[ ! -x "$SUPPORT/venv/bin/python" ]]; then
 fi
 uv pip install --python "$SUPPORT/venv/bin/python" -r "$SUPPORT/app/requirements.txt"
 
-say "Cek Tk (tampilan aplikasi)"
-"$SUPPORT/venv/bin/python" -c "import tkinter; tkinter.Tcl().eval('info patchlevel')" \
-  || { echo "tkinter tidak tersedia di Python ini."; exit 1; }
-
-say "Unduh model Whisper large-v3-turbo (~1,6 GB, sekali saja)"
+say "Cek model Whisper large-v3-turbo (~1,6 GB, diunduh sekali saja)"
 "$SUPPORT/venv/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('mlx-community/whisper-large-v3-turbo')"
 
 say "Buat $APP"
@@ -58,21 +64,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Meeting Notes</string>
   <key>CFBundleDisplayName</key><string>Meeting Notes</string>
   <key>CFBundleIdentifier</key><string>app.meetingreport.desktop</string>
-  <key>CFBundleVersion</key><string>1.0</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>2.0</string>
+  <key>CFBundleShortVersionString</key><string>2.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>MeetingNotes</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>CFBundleDocumentTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleTypeName</key><string>Audio</string>
-      <key>CFBundleTypeRole</key><string>Viewer</string>
-      <key>LSItemContentTypes</key>
-      <array><string>public.audio</string><string>public.movie</string></array>
-    </dict>
-  </array>
 </dict>
 </plist>
 PLIST
@@ -88,4 +85,5 @@ chmod +x "$APP/Contents/MacOS/MeetingNotes"
 say "Selesai"
 echo "Aplikasi: $APP"
 echo "Buka dari Finder > Applications (folder pribadi), atau jalankan: open \"$APP\""
-echo "Hasil rapat disimpan di: ~/Documents/Meeting Notes/"
+echo "Hasil rapat tetap di: ~/Documents/Meeting Notes/ (hasil v1 ikut tampil di Riwayat)"
+echo "Cadangan v1: $SUPPORT/app-v1 (kalau ada)"
