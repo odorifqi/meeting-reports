@@ -1278,7 +1278,7 @@ function S7() {
     ['gemini', 'Ya, setelah filter', 'Tingkat gratis boleh dipakai Google untuk perbaikan produk. Pakai key berbayar.'],
     ['compat', 'Tergantung server', 'Aman bila servernya milik atau disetujui kantor Anda.'],
     ['ollama', 'Tidak', 'Paling aman. Butuh RAM besar, lebih lambat, kualitas bahasa Indonesia di bawah model cloud besar.']];
-  const urlRow = pv.id === 'compat' || pv.id === 'ollama' ? `<div class="row"><div class="lb"><label for="ai-url">Alamat server</label><small>${pv.id === 'ollama' ? 'Bawaan Ollama di Mac ini' : 'Alamat API yang kompatibel OpenAI, diakhiri /v1'}</small></div><div class="rv"><input class="field mono" id="ai-url" style="width:280px" value="${esc(pv.base_url)}" placeholder="https://…/v1" data-ch="aiurl" spellcheck="false"></div></div>` : '';
+  const urlRow = pv.id === 'compat' || pv.id === 'ollama' ? `<div class="row"><div class="lb"><label for="ai-url">Alamat server</label><small>${pv.id === 'ollama' ? 'Bawaan Ollama di Mac ini' : 'Alamat dasar API kompatibel OpenAI, misalnya https://api.contoh.ai/v1 (tanpa /chat/completions)'}</small></div><div class="rv"><input class="field mono" id="ai-url" style="width:280px" value="${esc(pv.base_url)}" placeholder="https://…/v1" data-ch="aiurl" spellcheck="false"></div></div>` : '';
   const keyStatus = pv.key ? `<div class="row"><div class="lb">${pv.has_key ? `<span class="conn">${ic('check', 'sm')}API key ${esc(pv.short)} tersimpan di Keychain</span><small>Isi key tidak pernah ditampilkan. Key penyedia lain tetap tersimpan.</small>` : `<span>Belum ada API key ${esc(pv.short)}</span><small>Ringkasan dan saran AI butuh key</small>`}</div><div class="rv">${S.keyMsg ? `<span class="conn">${S.keyMsg}</span>` : ''}<button class="btn" data-act="testConn"${pv.has_key ? '' : ' disabled'}>Tes koneksi</button><button class="btn" data-act="keyTog">${pv.has_key ? 'Ganti key…' : 'Tambah key…'}</button>${pv.has_key ? '<button class="btn ghost dng" data-act="keyDel">Hapus</button>' : ''}</div></div>${keyRow}`
     : `<div class="row"><div class="lb"><span class="conn">${ic('lock', 'sm')}Tanpa API key</span><small>Model berjalan di Mac ini lewat Ollama. Teks tidak keluar dari Mac.</small></div><div class="rv">${S.keyMsg ? `<span class="conn">${S.keyMsg}</span>` : ''}<button class="btn" data-act="testConn">Tes koneksi</button></div></div>`;
   return tb(ttl('Pengaturan'), '') + `<div class="pane set"><div class="form">
@@ -1687,7 +1687,7 @@ const A = {
   },
   async testConn() {
     S.keyMsg = '<span class="spinner"></span> Menguji…'; render();
-    try { const r = await post('/api/settings/test-key', { provider: S.settings.ai.provider }); S.keyMsg = r.ok ? `${ic('check', 'sm')}Terhubung` : `${ic('warn', 'sm')}${esc(r.message)}`; } catch (e) { S.keyMsg = `${ic('warn', 'sm')}${esc(e.message)}`; }
+    try { const r = await post('/api/settings/test-key', { provider: S.settings.ai.provider }); S.keyMsg = r.ok ? `${ic('check', 'sm')}${esc(r.message || 'Terhubung')}` : `${ic('warn', 'sm')}${esc(r.message)}`; } catch (e) { S.keyMsg = `${ic('warn', 'sm')}${esc(e.message)}`; }
     render();
   },
 };
@@ -1794,7 +1794,7 @@ document.addEventListener('change', async ev => {
     else if (k === 'autoNext') { S.ed.autoNext = t.checked; }
     else if (k === 'aiprov') { S.keyEdit = false; S.keyMsg = ''; await saveCfg({ ai_provider: t.value }, true); toast(`Penyedia AI: ${S.settings.ai.provider_name}`); }
     else if (k === 'aimodel') { const v = t.value.trim(); if (v) await saveCfg({ ai_models: { [S.settings.ai.provider]: v } }); }
-    else if (k === 'aiurl') { const v = t.value.trim(); if (v && !/^https?:\/\//.test(v)) { toast('Alamat server harus diawali http:// atau https://', null, 'bad'); return; } await saveCfg({ ai_base_url: { [S.settings.ai.provider]: v } }); }
+    else if (k === 'aiurl') { const v = t.value.trim(); if (v && !/^https?:\/\//.test(v)) { toast('Alamat server harus diawali http:// atau https://', null, 'bad'); return; } const base = v.replace(/\/+$/, '').replace(/(\/(chat\/completions|completions|responses|models|messages))+$/i, ''); if (base !== v.replace(/\/+$/, '')) { t.value = base; toast(`Alamat disimpan sebagai ${base}. Aplikasi menambahkan /chat/completions sendiri.`, null, 'info'); } await saveCfg({ ai_base_url: { [S.settings.ai.provider]: base } }); }
     else if (k === 'dleft') { S.diff.left = t.value; await loadDiffLeft(); render(); }
     else if (k === 'donly') { S.diff.only = t.checked; render(); }
     else if (k === 'dtags') { S.diff.tags = t.checked; render(); }

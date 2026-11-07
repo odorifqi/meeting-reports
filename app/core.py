@@ -646,7 +646,7 @@ def provider_model(cfg: dict | None = None, provider: str | None = None) -> str:
 def provider_url(cfg: dict | None = None, provider: str | None = None) -> str:
     cfg = cfg or load_config()
     provider = provider or provider_id(cfg)
-    return ((cfg.get("ai_base_url") or {}).get(provider) or PROVIDERS[provider]["url"]).rstrip("/")
+    return normalize_base_url((cfg.get("ai_base_url") or {}).get(provider) or PROVIDERS[provider]["url"])
 
 
 def provider_name(cfg: dict | None = None, provider: str | None = None) -> str:
@@ -699,26 +699,121 @@ def key_problem(key: str, provider: str) -> str | None:
 
 
 class AIError(RuntimeError):
-    """Error from a provider, already in plain Indonesian."""
+    """Error from a provider. kind: "timeout", "network", "http", "empty" or "config";
+    status: HTTP status for "http"; detail: the server's own error text (short)."""
+
+    def __init__(self, msg: str, kind: str = "other", status: int | None = None, detail: str = "",
+                 host: str = ""):
+        super().__init__(msg)
+        self.kind, self.status, self.detail, self.host = kind, status, detail, host
 
 
-def _http_json(url: str, body: dict, headers: dict, timeout: float = 300) -> dict:
+AI_TIMEOUT = 300        # seconds without any data from the server before giving up
+_ENDPOINT_TAIL = re.compile(r"/(chat/completions|completions|responses|models|messages)/?$", re.I)
+
+
+def normalize_base_url(url: str) -> str:
+    """Users often paste the full endpoint (".../v1/chat/completions"). The app adds
+    the endpoint itself, so keep only the base (".../v1")."""
+    url = (url or "").strip().rstrip("/")
+    while True:
+        new = _ENDPOINT_TAIL.sub("", url).rstrip("/")
+        if new == url:
+            return url
+        url = new
+
+
+def _host(url: str) -> str:
+    from urllib.parse import urlparse
+    return urlparse(url).netloc or url
+
+
+def _err_detail(raw: bytes) -> str:
+    text = raw.decode("utf-8", "replace").strip()
+    try:
+        data = json.loads(text)
+        err = data.get("error") if isinstance(data, dict) else None
+        if isinstance(err, dict):
+            text = err.get("message") or json.dumps(err, ensure_ascii=False)
+        elif err:
+            text = str(err)
+        elif isinstance(data, dict) and data.get("message"):
+            text = str(data["message"])
+    except ValueError:
+        text = re.sub(r"<[^>]+>", " ", text)       # HTML error pages from proxies
+    return re.sub(r"\s+", " ", text).strip()[:300]
+
+
+def _raise_net(exc: BaseException, url: str, timeout: float):
+    import socket
+    host = _host(url)
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, (TimeoutError, socket.timeout)) or isinstance(exc, (TimeoutError, socket.timeout)):
+        raise AIError(f"timeout after {int(timeout)} s", "timeout", host=host) from exc
+    raise AIError(f"network: {type(reason).__name__}: {reason}", "network", detail=str(reason)[:200],
+                  host=host) from exc
+
+
+def _http_json(url: str, body: dict, headers: dict, timeout: float = AI_TIMEOUT) -> dict:
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
                                  headers={"Content-Type": "application/json", **headers}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            data = json.loads(exc.read().decode("utf-8", "replace"))
-            err = data.get("error") if isinstance(data, dict) else None
-            detail = (err.get("message") if isinstance(err, dict) else str(err or "")) or ""
-        except Exception:  # noqa: BLE001
-            pass
-        raise AIError(f"HTTP {exc.code}: {detail[:200]}".strip(": ")) from exc
-    except urllib.error.URLError as exc:
-        raise AIError(f"Connection: {exc.reason}") from exc
+        detail = _err_detail(exc.read() or b"")
+        raise AIError(f"HTTP {exc.code}: {detail}".strip(": "), "http", exc.code, detail, _host(url)) from exc
+    except (urllib.error.URLError, OSError) as exc:
+        _raise_net(exc, url, timeout)
+
+
+def _chat_stream(url: str, body: dict, headers: dict, timeout: float = AI_TIMEOUT) -> str:
+    """POST an OpenAI-style chat request with stream=true and join the pieces.
+
+    Streaming keeps data flowing while a long summary is written, so proxies and
+    gateways that drop silent connections (often after 60-120 s) do not cut it, and
+    `timeout` applies to each wait for data instead of to the whole answer. A server
+    that ignores "stream" and answers with plain JSON is handled too."""
+    req = urllib.request.Request(url, data=json.dumps({**body, "stream": True}).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", "Accept": "text/event-stream",
+                                          **headers}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if "event-stream" not in ctype:
+                data = json.loads(r.read().decode("utf-8"))
+                if isinstance(data, dict) and data.get("error"):
+                    detail = _err_detail(json.dumps(data).encode())
+                    raise AIError(detail, "http", None, detail, _host(url))
+                choices = data.get("choices") or []
+                return ((choices[0].get("message") or {}).get("content") or "") if choices else ""
+            out = []
+            for raw in r:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    ev = json.loads(payload)
+                except ValueError:
+                    continue
+                if ev.get("error"):
+                    detail = _err_detail(payload.encode())
+                    raise AIError(detail, "http", None, detail, _host(url))
+                for ch in ev.get("choices") or []:
+                    piece = (ch.get("delta") or {}).get("content") or (ch.get("message") or {}).get("content")
+                    if piece:
+                        out.append(piece)
+            return "".join(out)
+    except urllib.error.HTTPError as exc:
+        detail = _err_detail(exc.read() or b"")
+        raise AIError(f"HTTP {exc.code}: {detail}".strip(": "), "http", exc.code, detail, _host(url)) from exc
+    except AIError:
+        raise
+    except (urllib.error.URLError, OSError) as exc:
+        _raise_net(exc, url, timeout)
 
 
 def ai_text(system: str, user: str, api_key: str, model: str = CLAUDE_MODEL,
@@ -726,7 +821,7 @@ def ai_text(system: str, user: str, api_key: str, model: str = CLAUDE_MODEL,
     """One prompt to the chosen provider, returns the text answer."""
     cfg = load_config()
     provider = provider or provider_id(cfg)
-    url = (base_url or provider_url(cfg, provider)).rstrip("/")
+    url = normalize_base_url(base_url or provider_url(cfg, provider))
     if provider == "anthropic":
         import anthropic
 
@@ -745,13 +840,15 @@ def ai_text(system: str, user: str, api_key: str, model: str = CLAUDE_MODEL,
         return "".join(p.get("text", "") for p in parts).strip()
     # openai, compat (any OpenAI-compatible server) and ollama
     if not url:
-        raise AIError("Alamat server belum diisi di Pengaturan.")
+        raise AIError("Alamat server belum diisi di Pengaturan.", "config")
     headers = {"Authorization": f"Bearer {api_key}"} if PROVIDERS[provider]["key"] else {}
     body = {"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
     body["max_completion_tokens" if provider == "openai" else "max_tokens"] = max_tokens
-    data = _http_json(f"{url}/chat/completions", body, headers, timeout=900 if provider == "ollama" else 300)
-    choices = data.get("choices") or []
-    return ((choices[0].get("message") or {}).get("content") or "").strip() if choices else ""
+    text = _chat_stream(f"{url}/chat/completions", body, headers,
+                        timeout=900 if provider == "ollama" else AI_TIMEOUT).strip()
+    if not text:
+        raise AIError("empty answer", "empty", host=_host(url))
+    return text
 
 
 claude_text = ai_text   # older name, kept for scripts
@@ -839,9 +936,14 @@ def summarize(transcript: str, api_key: str, model: str = CLAUDE_MODEL, context:
 
 def test_api_key(api_key: str, model: str = CLAUDE_MODEL, provider: str | None = None,
                  base_url: str | None = None) -> None:
-    """Raise if the provider rejects the key or cannot be reached. Sends no meeting data."""
-    ai_text("Jawab dengan satu kata.", "ok", api_key, model, max_tokens=16, provider=provider,
-            base_url=base_url)
+    """Raise if the provider rejects the key or cannot be reached. Sends no meeting data.
+    Goes through the same path as a summary (same URL, model and streaming)."""
+    try:
+        ai_text("Jawab dengan satu kata.", "ok", api_key, model, max_tokens=200, provider=provider,
+                base_url=base_url)
+    except AIError as exc:
+        if exc.kind != "empty":     # reasoning models may spend a tiny budget thinking; the server works
+            raise
 
 
 # --------------------------------------------------------------------------- export

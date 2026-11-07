@@ -27,7 +27,7 @@ import jobs as jobs_mod
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
@@ -704,7 +704,7 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
                 cur = dict(cfg.get("ai_base_url") or {})
                 for p, uv in (v or {}).items():
                     if p in core.PROVIDERS and _url_ok(uv):
-                        cur[p] = uv.strip().rstrip("/")
+                        cur[p] = core.normalize_base_url(uv)
                 cfg[k] = cur
                 continue
             if k == "whisper_model":
@@ -771,11 +771,16 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         key = jb.api_key(p)
         if not key:
             raise HTTPException(400, "API key belum diisi")
+        model = core.provider_model(cfg, p)
+        url = core.provider_url(cfg, p)
+        t0 = time.time()
         try:
-            core.test_api_key(key, core.provider_model(cfg, p), provider=p, base_url=core.provider_url(cfg, p))
+            core.test_api_key(key, model, provider=p, base_url=url)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "message": jobs_mod._friendly(exc, core.provider_name(cfg, p))}
-        return {"ok": True}
+        where = f"{url}/chat/completions" if p not in ("anthropic", "gemini") else core.PROVIDERS[p]["name"]
+        secs = f"{time.time() - t0:.1f}".replace(".", ",")
+        return {"ok": True, "message": f"Terhubung ke {where} · model {model} · {secs} detik"}
 
     @app.get("/api/send-log")
     def send_log(limit: int = 20):

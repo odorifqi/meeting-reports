@@ -329,19 +329,119 @@ def test_provider_settings(env, monkeypatch):
     c.put("/api/settings", json={"ai_provider": "anthropic"})
 
 
-def test_ai_text_openai_compatible(monkeypatch):
-    sent = {}
+def _fake_ai_server(handler_fn):
+    """Local OpenAI-style server; handler_fn(path, body, handler) writes the reply."""
+    import http.server
+    import threading as th
 
-    def fake_http(url, body, headers, timeout=300):
-        sent.update(url=url, body=body, headers=headers)
-        return {"choices": [{"message": {"content": " halo "}}]}
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
 
-    monkeypatch.setattr(core, "_http_json", fake_http)
-    out = core.ai_text("sys", "isi", "k", "gpt-5", 100, provider="openai")
-    assert out == "halo" and sent["url"] == "https://api.openai.com/v1/chat/completions"
-    assert sent["headers"]["Authorization"] == "Bearer k" and sent["body"]["max_completion_tokens"] == 100
-    core.ai_text("sys", "isi", "local", "qwen3:14b", 50, provider="ollama")
-    assert "Authorization" not in sent["headers"] and sent["body"]["max_tokens"] == 50
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            H.seen.append({"path": self.path, "body": body, "auth": self.headers.get("Authorization")})
+            handler_fn(self.path, body, self)
+
+    H.seen = []
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    th.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, H.seen, f"http://127.0.0.1:{srv.server_address[1]}/v1"
+
+
+def _reply(h, code, data, ctype="application/json"):
+    raw = data if isinstance(data, bytes) else json.dumps(data).encode()
+    h.send_response(code)
+    h.send_header("Content-Type", ctype)
+    h.send_header("Content-Length", str(len(raw)))
+    h.end_headers()
+    h.wfile.write(raw)
+
+
+@pytest.fixture()
+def no_proxy(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+
+
+def test_normalize_base_url():
+    n = core.normalize_base_url
+    assert n("https://api.example.com/v1/chat/completions") == "https://api.example.com/v1"
+    assert n("https://api.example.com/v1/chat/completions/") == "https://api.example.com/v1"
+    assert n(" https://api.example.com/v1/ ") == "https://api.example.com/v1"
+    assert n("http://127.0.0.1:11434/v1/models") == "http://127.0.0.1:11434/v1"
+
+
+def test_ai_text_streams_and_normalizes(no_proxy):
+    def h(path, body, hd):
+        if path != "/v1/chat/completions":
+            return _reply(hd, 404, {"error": {"message": "no route"}})
+        if not body.get("stream"):
+            return _reply(hd, 400, {"error": "stream expected"})
+        chunks = [{"choices": [{"delta": {"content": p}}]} for p in ["# Rapat", "\nIsi ", "ringkasan"]]
+        raw = b"".join(b"data: " + json.dumps(c).encode() + b"\n\n" for c in chunks) + b"data: [DONE]\n\n"
+        _reply(hd, 200, raw, "text/event-stream")
+
+    srv, seen, base = _fake_ai_server(h)
+    try:
+        out = core.ai_text("sys", "isi", "k", "m1", 100, provider="compat", base_url=base + "/chat/completions")
+        assert out == "# Rapat\nIsi ringkasan"
+        assert seen[-1]["path"] == "/v1/chat/completions" and seen[-1]["auth"] == "Bearer k"
+        assert seen[-1]["body"]["max_tokens"] == 100 and seen[-1]["body"]["stream"] is True
+        core.ai_text("sys", "isi", "local", "qwen3:14b", 50, provider="ollama", base_url=base)
+        assert seen[-1]["auth"] is None
+    finally:
+        srv.shutdown()
+
+
+def test_ai_text_plain_json_fallback_and_errors(no_proxy, monkeypatch):
+    mode = {"m": "json"}
+
+    def h(path, body, hd):
+        if mode["m"] == "json":
+            return _reply(hd, 200, {"choices": [{"message": {"content": " halo "}}]})
+        if mode["m"] == "404":
+            return _reply(hd, 404, {"error": {"message": "model 'x' not found"}})
+        if mode["m"] == "524":
+            return _reply(hd, 524, b"<html><body>A timeout occurred</body></html>", "text/html")
+        if mode["m"] == "slow":
+            import time as t
+            t.sleep(1.5)
+            return _reply(hd, 200, {"choices": [{"message": {"content": "late"}}]})
+
+    srv, seen, base = _fake_ai_server(h)
+    try:
+        assert core.ai_text("s", "u", "k", "m", 10, provider="compat", base_url=base) == "halo"
+        mode["m"] = "404"
+        with pytest.raises(core.AIError) as e:
+            core.ai_text("s", "u", "k", "x", 10, provider="compat", base_url=base)
+        assert e.value.kind == "http" and e.value.status == 404 and "not found" in e.value.detail
+        msg = jobs_mod._friendly(e.value, "Server kustom")
+        assert "HTTP 404" in msg and "model 'x' not found" in msg and "/v1" in msg
+        mode["m"] = "524"
+        with pytest.raises(core.AIError) as e:
+            core.ai_text("s", "u", "k", "m", 10, provider="compat", base_url=base)
+        assert e.value.status == 524 and "A timeout occurred" in e.value.detail
+        assert "kehabisan waktu" in jobs_mod._friendly(e.value, "Server kustom")
+        mode["m"] = "slow"
+        monkeypatch.setattr(core, "AI_TIMEOUT", 0.5)
+        with pytest.raises(core.AIError) as e:
+            core.ai_text("s", "u", "k", "m", 10, provider="compat", base_url=base)
+        assert e.value.kind == "timeout"
+        assert "tidak mengirim jawaban" in jobs_mod._friendly(e.value, "Server kustom")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    with pytest.raises(core.AIError) as e:
+        core.ai_text("s", "u", "k", "m", 10, provider="compat", base_url=base)   # server gone
+    assert e.value.kind == "network"
+    assert "terputus atau gagal dibuka" in jobs_mod._friendly(e.value, "Server kustom")
+
+
+def test_settings_store_base_url_without_endpoint(env):
+    c, *_ = env
+    c.put("/api/settings", json={"ai_base_url": {"compat": "https://api.example.com/v1/chat/completions"}})
+    assert c.get("/api/settings").json()["config"]["ai_base_url"]["compat"] == "https://api.example.com/v1"
 
 
 # ---------------------------------------------------------------------------- video (Usulan 15)

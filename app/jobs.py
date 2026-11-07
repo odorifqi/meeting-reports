@@ -371,7 +371,19 @@ class Jobs:
                 user += f"\n\nKonteks tambahan dari pengguna: {send['context']}"
             st.log_send(mid, {"kind": "summary", "provider": provider, "model": model, "words": send["words"],
                               "masked": send["masked"], "withheld": send["withheld"], "rev": m.get("transcript_rev")})
-            raw = self.claude(core.SUMMARY_SYSTEM, user, key, model, 8000)
+            host = core._host(core.provider_url(cfg, provider)) if provider != "anthropic" else "api.anthropic.com"
+            n_chars = f"{len(user):,}".replace(",", ".")
+            self._log(mid, f"Kirim ringkasan ke {pname} ({host}), model {model}, {n_chars} karakter")
+            t0 = time.time()
+            try:
+                raw = self.claude(core.SUMMARY_SYSTEM, user, key, model, 8000)
+            except Exception as exc:
+                kind = getattr(exc, "kind", type(exc).__name__)
+                status = getattr(exc, "status", None)
+                self._log(mid, f"Jawaban gagal setelah {round(time.time() - t0)} detik: {kind}"
+                               + (f" HTTP {status}" if status else ""))
+                raise
+            self._log(mid, f"Jawaban diterima dalam {round(time.time() - t0)} detik")
             self._progress(mid, phase="restore", masked=send["masked"], withheld=send["withheld"],
                            words=send["words"], model=model)
             md = filters.restore(raw, send["tokens"])
@@ -420,6 +432,36 @@ class Jobs:
 def _friendly(exc: Exception, provider: str = "Anthropic") -> str:
     name = type(exc).__name__
     msg = str(exc)
+    if isinstance(exc, core.AIError) and exc.kind != "other":
+        where = f" ({exc.host})" if exc.host else ""
+        said = f" Pesan server: \u201c{exc.detail}\u201d" if exc.detail and exc.kind == "http" else ""
+        if exc.kind == "config":
+            return msg
+        if exc.kind == "timeout":
+            return (f"{provider}{where} tidak mengirim jawaban dalam {core.AI_TIMEOUT // 60} menit. "
+                    "Server mungkin sedang lambat atau model terlalu berat untuk transkrip sepanjang ini. "
+                    "Coba lagi, atau pilih model yang lebih cepat.")
+        if exc.kind == "network":
+            if provider == "Ollama lokal":
+                return "Ollama tidak berjalan di Mac ini. Buka Ollama, lalu coba lagi."
+            return (f"Koneksi ke {provider}{where} terputus atau gagal dibuka ({exc.detail or 'jaringan'}). "
+                    "Periksa internet dan alamat server di Pengaturan.")
+        if exc.kind == "empty":
+            return f"{provider}{where} menjawab kosong. Periksa nama model di Pengaturan."
+        s = exc.status
+        if s in (401, 403):
+            return f"API key ditolak {provider} (HTTP {s}).{said}"
+        if s == 404:
+            return (f"Alamat atau model tidak ditemukan di {provider}{where} (HTTP 404). Isi alamat dasar saja, "
+                    f"misalnya https://server/v1, dan periksa nama model.{said}")
+        if s == 429:
+            return f"Batas pemakaian {provider} tercapai (HTTP 429). Coba lagi beberapa menit lagi.{said}"
+        if s in (408, 504, 524):
+            return (f"Server {provider}{where} kehabisan waktu menunggu model (HTTP {s}). "
+                    f"Coba lagi atau pilih model yang lebih cepat.{said}")
+        if s and s >= 500:
+            return f"Server {provider}{where} sedang bermasalah (HTTP {s}). Coba lagi.{said}"
+        return f"{provider}{where} menolak permintaan" + (f" (HTTP {s})." if s else ".") + said
     if "Authentication" in name or "401" in msg or "403" in msg:
         return f"API key ditolak {provider}. Periksa di Pengaturan."
     if "RateLimit" in name or "429" in msg:
