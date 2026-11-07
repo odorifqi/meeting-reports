@@ -24,8 +24,9 @@ CLAUDE_MODEL = "claude-sonnet-5-5"
 KEYCHAIN_SERVICE = "MeetingNotes"
 KEYCHAIN_ACCOUNT = "anthropic-api-key"
 
-SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "MeetingNotes"
-OUTPUT_ROOT = Path.home() / "Documents" / "Meeting Notes"
+SUPPORT_DIR = Path(os.environ.get("MN_SUPPORT_DIR")
+                   or Path.home() / "Library" / "Application Support" / "MeetingNotes")
+OUTPUT_ROOT = Path(os.environ.get("MN_OUTPUT_DIR") or Path.home() / "Documents" / "Meeting Notes")
 VOICE_MEMOS_DIR = (Path.home() / "Library" / "Group Containers"
                    / "group.com.apple.VoiceMemos.shared" / "Recordings")
 
@@ -40,14 +41,22 @@ DEFAULT_CONFIG = {
     "save_clean_audio": True,
     "language": "id",
     "vocabulary": "",
+    "theme": "system",
+    # F15: categories masked before any text leaves the Mac
+    "redact": {"rekening": True, "nik": True, "hp": True, "kartu": True, "npwp": True, "email": True},
+    "sensitive_words": "",
+    "word_confidence": True,
 }
 
 
 def load_config() -> dict:
     path = SUPPORT_DIR / "config.json"
-    cfg = dict(DEFAULT_CONFIG)
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     try:
-        cfg.update(json.loads(path.read_text(encoding="utf-8")))
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        redact = {**cfg["redact"], **(saved.get("redact") or {})}
+        cfg.update(saved)
+        cfg["redact"] = redact
     except (OSError, ValueError):
         pass
     return cfg
@@ -204,42 +213,94 @@ def chunk_bounds(clean: CleanResult, chunk_sec: float = CHUNK_SEC) -> list[tuple
 
 # --------------------------------------------------------------------------- transcription
 
-def transcribe(clean: CleanResult, language: str | None, vocabulary: str = "",
-               repo: str = WHISPER_REPO, progress=None) -> list[dict]:
+LOW_WORD_PROB = 0.45      # words below this probability are flagged for review
+
+
+class Cancelled(Exception):
+    """Raised when the user cancels a running transcription."""
+
+
+def whisper_prompt(vocabulary: str = "", participants: list[str] | None = None) -> str | None:
+    parts = []
+    if vocabulary.strip():
+        parts.append(f"Istilah: {vocabulary.strip()}.")
+    names = [p for p in (participants or []) if p.strip()]
+    if names:
+        parts.append(f"Peserta: {', '.join(names)}.")
+    return " ".join(parts) if parts else None
+
+
+def transcribe_chunk(audio: np.ndarray, language: str | None, prompt: str | None,
+                     repo: str = WHISPER_REPO, word_confidence: bool = True) -> list[dict]:
+    """Transcribe one chunk. Times are relative to the chunk start (clean timeline)."""
     import mlx_whisper  # Apple Silicon only
 
+    result = mlx_whisper.transcribe(
+        audio,
+        path_or_hf_repo=repo,
+        language=language or None,
+        condition_on_previous_text=False,   # avoids repeated-phrase loops
+        initial_prompt=prompt,
+        word_timestamps=word_confidence,
+        verbose=None,
+    )
+    out = []
+    for s in result.get("segments", []):
+        text = s.get("text", "").strip()
+        if not text:
+            continue
+        # standard Whisper hallucination guard
+        if s.get("no_speech_prob", 0) > 0.6 and s.get("avg_logprob", 0) < -1.0:
+            continue
+        low = []
+        for w in s.get("words") or []:
+            word = str(w.get("word", "")).strip()
+            if word and float(w.get("probability", 1.0)) < LOW_WORD_PROB:
+                low.append(word.strip(".,?!;:"))
+        out.append({
+            "start": float(s["start"]),
+            "end": float(s["end"]),
+            "text": text,
+            "avg_logprob": round(float(s.get("avg_logprob", 0.0)), 3),
+            "low_words": [w for w in low if w],
+        })
+    return out
+
+
+def place_chunk(clean: CleanResult, chunk_start_sample: int, segs: list[dict]) -> list[dict]:
+    """Map chunk-relative segment times back to the original recording."""
+    base = chunk_start_sample / SR
+    placed = []
+    for s in segs:
+        placed.append({**s, "start": round(clean.to_original(base + s["start"]), 2),
+                       "end": round(clean.to_original(base + s["end"]), 2)})
+    return placed
+
+
+def dedupe(segments: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for s in segments:
+        if out and out[-1]["text"] == s["text"]:
+            continue
+        out.append(s)
+    return out
+
+
+def transcribe(clean: CleanResult, language: str | None, vocabulary: str = "",
+               repo: str = WHISPER_REPO, progress=None, participants=None,
+               word_confidence: bool = True) -> list[dict]:
+    """Whole-recording transcription (kept for scripts and v1 compatibility)."""
     chunks = chunk_bounds(clean)
-    prompt = f"Istilah: {vocabulary.strip()}." if vocabulary.strip() else None
+    prompt = whisper_prompt(vocabulary, participants)
     segments: list[dict] = []
     for i, (a, b) in enumerate(chunks):
         if progress:
             progress(i, len(chunks))
-        result = mlx_whisper.transcribe(
-            clean.audio[a:b],
-            path_or_hf_repo=repo,
-            language=language or None,
-            condition_on_previous_text=False,   # avoids repeated-phrase loops
-            initial_prompt=prompt,
-            verbose=None,
-        )
-        base = a / SR
-        for s in result.get("segments", []):
-            text = s.get("text", "").strip()
-            if not text:
-                continue
-            # standard Whisper hallucination guard
-            if s.get("no_speech_prob", 0) > 0.6 and s.get("avg_logprob", 0) < -1.0:
-                continue
-            if segments and segments[-1]["text"] == text:
-                continue
-            segments.append({
-                "start": clean.to_original(base + s["start"]),
-                "end": clean.to_original(base + s["end"]),
-                "text": text,
-            })
+        segs = transcribe_chunk(clean.audio[a:b], language, prompt, repo, word_confidence)
+        segments.extend(place_chunk(clean, a, segs))
     if progress:
         progress(len(chunks), len(chunks))
-    return segments
+    return dedupe(segments)
 
 
 def fmt_ts(sec: float) -> str:
@@ -247,16 +308,106 @@ def fmt_ts(sec: float) -> str:
     return f"{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
 
 
-def format_transcript(segments: list[dict], title: str, clean: CleanResult | None = None) -> str:
-    lines = [f"Transkrip: {title}",
-             f"Dibuat: {dt.datetime.now():%d %B %Y %H:%M}"]
-    if clean is not None:
-        lines.append(f"Durasi rekaman: {fmt_ts(clean.original_sec)}"
-                     f"  |  bagian hening dibuang: {fmt_ts(clean.removed_sec)}")
-    lines.append("Timestamp mengacu ke rekaman asli.")
-    lines.append("")
-    lines += [f"[{fmt_ts(s['start'])}] {s['text']}" for s in segments]
-    return "\n".join(lines) + "\n"
+def fmt_dur(sec: float) -> str:
+    sec = int(round(sec))
+    h, m, s = sec // 3600, sec % 3600 // 60, sec % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+HARI = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+BULAN = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus",
+         "September", "Oktober", "November", "Desember"]
+
+
+def fmt_date_id(d: dt.datetime, with_day: bool = True) -> str:
+    base = f"{d.day} {BULAN[d.month - 1]} {d.year}, {d:%H.%M}"
+    return f"{HARI[d.weekday()]}, {base}" if with_day else base
+
+
+def fmt_date_short(d: dt.datetime) -> str:
+    return f"{d.day} {BULAN[d.month - 1][:3]} {d.year} {d:%H.%M}"
+
+
+def format_transcript(segments: list[dict], title: str, clean: CleanResult | None = None,
+                      meta: dict | None = None, participants: list[dict] | None = None) -> str:
+    """Write Transkrip.txt.
+
+    With `meta` (v1.1) the header follows the approved sample report: title, date,
+    recording, language, version, tagging status, Claude suggestions and the
+    participant block. Lines are "[HH:MM:SS] Nama: teks", "(Belum ditandai): teks"
+    when a participant list exists but the segment is untagged, or plain text
+    when no participants were entered.
+    """
+    if meta is None:   # v1 format
+        lines = [f"Transkrip: {title}",
+                 f"Dibuat: {dt.datetime.now():%d %B %Y %H:%M}"]
+        if clean is not None:
+            lines.append(f"Durasi rekaman: {fmt_ts(clean.original_sec)}"
+                         f"  |  bagian hening dibuang: {fmt_ts(clean.removed_sec)}")
+        lines.append("Timestamp mengacu ke rekaman asli.")
+        lines.append("")
+        lines += [f"[{fmt_ts(s['start'])}] {s['text']}" for s in segments]
+        return "\n".join(lines) + "\n"
+
+    parts = participants or []
+    names = {p["id"]: p["name"] for p in parts}
+    total = len(segments)
+    tagged = sum(1 for s in segments if s.get("speaker_id") in names)
+    L = ["TRANSKRIP RAPAT",
+         f"Judul        : {title}"]
+    if meta.get("created"):
+        L.append(f"Tanggal      : {fmt_date_id(dt.datetime.fromisoformat(meta['created']))}")
+    rec = meta.get("source_name") or ""
+    if meta.get("duration_sec"):
+        rec += f" ({fmt_dur(meta['duration_sec'])}"
+        if meta.get("clean_sec") and meta.get("remove_silence", True):
+            rec += f"; setelah buang hening {fmt_dur(meta['clean_sec'])}"
+        rec += ")"
+    if rec.strip():
+        L.append(f"Rekaman      : {rec.strip()}")
+    L.append(f"Bahasa       : {LANG_NAMES.get(meta.get('language') or '', 'Otomatis')}")
+    if meta.get("rev"):
+        saved = meta.get("saved_at")
+        L.append(f"Versi        : {meta['rev']}" + (
+            f", disimpan {fmt_date_short(dt.datetime.fromisoformat(saved))}" if saved else ""))
+    if not parts:
+        L.append(f"Penanda      : Tidak ada (0 dari {total} segmen)")
+    elif tagged == total:
+        L.append(f"Penanda      : {tagged} dari {total} segmen ditandai")
+    else:
+        L.append(f"Penanda      : {tagged} dari {total} segmen ditandai, {total - tagged} belum ditandai")
+    cs = meta.get("claude_suggest")
+    if cs:
+        L.append(f"Saran Claude : ✦ Disarankan Claude, {fmt_date_short(dt.datetime.fromisoformat(cs['at']))}"
+                 f" ({cs.get('accepted', 0)} diterima, {cs.get('rejected', 0)} ditolak)")
+    else:
+        L.append("Saran Claude : Tidak dijalankan")
+    L.append("Timestamp mengacu ke rekaman asli.")
+    L.append("")
+    if not parts:
+        L.append("PESERTA      : Tidak diisi")
+    else:
+        L.append(f"PESERTA ({len(parts)})")
+        for i, p in enumerate(parts):
+            L.append(f"  {i + 1}. {p['name'].ljust(16)}{p.get('role') or ''}".rstrip())
+    L.append("")
+    L.append("─" * 44)
+    for s in segments:
+        ts = f"[{fmt_ts(s['start'])}]"
+        if s.get("secret"):
+            text = s["text"] + "  (rahasia, tidak dikirim ke Claude)"
+        else:
+            text = s["text"]
+        if not parts:
+            L.append(f"{ts} {text}")
+        elif s.get("speaker_id") in names:
+            L.append(f"{ts} {names[s['speaker_id']]}: {text}")
+        else:
+            L.append(f"{ts} (Belum ditandai): {text}")
+    return "\n".join(L) + "\n"
+
+
+LANG_NAMES = {"id": "Indonesia", "en": "Inggris", "": "Otomatis"}
 
 
 # --------------------------------------------------------------------------- API key (macOS Keychain)
@@ -274,6 +425,11 @@ def get_api_key() -> str | None:
         return None
 
 
+def delete_api_key() -> None:
+    subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE,
+                    "-a", KEYCHAIN_ACCOUNT], capture_output=True)
+
+
 def set_api_key(key: str) -> None:
     subprocess.run(["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE,
                     "-a", KEYCHAIN_ACCOUNT, "-w", key.strip()],
@@ -283,7 +439,7 @@ def set_api_key(key: str) -> None:
 # --------------------------------------------------------------------------- summary
 
 SUMMARY_SYSTEM = """Kamu adalah notulis profesional.
-Tugasmu menyusun laporan dari transkrip hasil speech-to-text otomatis.
+Tugasmu menyusun laporan dari transkrip hasil speech-to-text otomatis yang sudah ditinjau pengguna.
 
 Jenis rekaman:
 - Rekaman bisa berupa rapat, diskusi, wawancara, kuliah, presentasi, podcast, siaran, atau narasi video.
@@ -291,34 +447,55 @@ Jenis rekaman:
 - Pakai info rapat dan konteks tambahan dari pengguna bila ada. Jangan mengarang konteks organisasi yang tidak disebut.
 - Bagian yang tidak relevan untuk jenis rekaman itu (misalnya Keputusan atau Action Items pada narasi video) tetap ditulis, isinya "Tidak ada".
 
-Aturan:
+Aturan umum:
 - Tulis dalam bahasa yang sama dengan transkrip (umumnya Bahasa Indonesia baku, ringkas).
-- Jangan mengarang. Kalau PIC, tenggat, atau angka tidak disebut, tulis "Tidak disebutkan".
+- Jangan mengarang. Kalau tenggat atau angka tidak disebut, tulis "Tidak disebutkan".
 - Transkrip bisa berisi salah dengar. Tafsirkan sesuai konteks. Istilah yang ragu, tandai dengan (?).
-- Transkrip tidak memisahkan pembicara. Sebut nama orang hanya kalau namanya terucap.
-- Sertakan timestamp [HH:MM:SS] untuk keputusan dan action item bila bisa dilacak.
+- Sertakan timestamp [HH:MM:SS] untuk poin, keputusan, dan action item bila bisa dilacak.
+- Teks berisi token seperti ‹REKENING_1›, ‹NIK_1›, ‹NAMA_1›. Itu data yang disamarkan. Salin token apa adanya, jangan diubah, ditebak, atau dijelaskan.
+- Baris "(segmen rahasia, tidak dikirim)" berarti isinya sengaja ditahan. Jangan menebak isinya.
 
-Gunakan format Markdown persis seperti ini:
+Label pembicara:
+- Baris "[HH:MM:SS] Nama: teks" berarti suara itu sudah ditandai sebagai peserta tersebut.
+- Baris "[HH:MM:SS] (Belum ditandai): teks" berarti pembicaranya belum ditandai. Jangan menebak namanya dari konteks, misalnya dari sapaan di segmen sebelumnya.
+- Baris tanpa label berarti daftar peserta tidak diisi dan tidak ada penanda sama sekali.
+
+Bagian Peserta:
+- Kalau ada daftar peserta, buat bagian "## Peserta" berupa tabel | Nama | Jabatan/Unit | Segmen | dari daftar (jumlah segmen sudah diberikan). Kalau ada segmen belum ditandai, tambahkan baris "| ? Belum ditandai | – | <jumlah> |". Nama yang disebut dalam percakapan sebagai peserta tetapi tidak ada di daftar, tulis di bawah tabel dengan judul tebal "Disebut dalam percakapan, belum ada di daftar peserta:" beserta timestamp.
+- Kalau daftar peserta tidak diisi, buat bagian "## Peserta yang Disebut" (format lama): hanya nama yang terucap dalam percakapan, beserta konteks singkat dan timestamp, diawali catatan miring bahwa nama diambil dari isi percakapan, bukan dari suara.
+- Orang yang hanya dibicarakan (klien, pihak luar, tokoh yang dibahas) tidak dimasukkan ke bagian Peserta.
+
+Atribusi dan PIC (cek dari atas, pakai sumber pertama yang ada):
+1. Ditunjuk dengan nama dalam percakapan ("Pak Andi, tolong ..."): PIC = nama itu. Dasar PIC: "◆ Ditunjuk dengan nama [HH:MM:SS]".
+2. Menyanggupi sendiri dan suaranya ditandai: PIC = nama dari label. Dasar PIC: "✓ Menyanggupi, suara ditandai [HH:MM:SS]".
+3. Menyebut unit, bukan orang ("biar tim produk yang susun"): PIC = unit, plus nama dalam kurung bila suaranya ditandai. Dasar PIC: "◆ Unit disebut [HH:MM:SS]" atau "✓ Menyanggupi untuk unit, suara ditandai [HH:MM:SS]".
+4. Menyanggupi sendiri tetapi suaranya belum ditandai: PIC = "? Belum ditandai · HH:MM:SS". Dasar PIC: "? Menyanggupi, suara belum ditandai [HH:MM:SS]".
+5. Forum menyatakan belum ada penanggung jawab: PIC = "Belum ditentukan".
+6. Tidak ada informasi sama sekali: PIC = "Tidak disebutkan".
+- Untuk poin dan keputusan: pakai nama bila suaranya ditandai; kalau belum, pakai unit yang disebut ("Perwakilan IT") atau "pembicara yang belum ditandai", atau "pimpinan rapat". Jangan pernah menyimpulkan nama dari suara yang belum ditandai.
+- Kalau ada action item dengan PIC "? Belum ditandai", tambahkan butir di Isu Terbuka: PIC action item No X belum pasti karena pembicaranya belum ditandai; sebut timestamp-nya.
+
+Gunakan format Markdown persis seperti ini (tanpa teks lain sebelum judul):
 
 # <Judul yang disimpulkan dari isi>
 
 ## Ringkasan Eksekutif
 <3-5 kalimat>
 
-## Peserta yang Disebut
-- ...
+## Peserta
+<tabel atau "## Peserta yang Disebut" sesuai aturan di atas>
 
 ## Poin Pembahasan
-### <Topik 1>
-- ...
+1. **<Topik>** [HH:MM:SS–HH:MM:SS]. <isi>
+2. **<Topik>** [HH:MM:SS–HH:MM:SS]. <isi>
 
 ## Keputusan
-- ...
+1. ...
 
 ## Action Items
-| No | Tugas | PIC | Tenggat |
-|---|---|---|---|
-| 1 | ... | ... | ... |
+| No | Tugas | PIC | Tenggat | Dasar PIC |
+|---|---|---|---|---|
+| 1 | ... | ... | ... | ... |
 
 ## Isu Terbuka dan Risiko
 - ...
@@ -328,25 +505,39 @@ Gunakan format Markdown persis seperti ini:
 """
 
 
-def summarize(transcript: str, api_key: str, model: str = CLAUDE_MODEL, context: str = "") -> str:
+def claude_text(system: str, user: str, api_key: str, model: str = CLAUDE_MODEL,
+                max_tokens: int = 8000) -> str:
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key)
-    user = f"<transkrip>\n{transcript}\n</transkrip>"
-    if context.strip():
-        user += f"\n\nKonteks tambahan dari pengguna: {context.strip()}"
     msg = client.messages.create(
         model=model,
-        max_tokens=8000,
-        system=SUMMARY_SYSTEM,
+        max_tokens=max_tokens,
+        system=system,
         messages=[{"role": "user", "content": user}],
     )
     return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip()
 
 
+def summarize(transcript: str, api_key: str, model: str = CLAUDE_MODEL, context: str = "",
+              header: str = "") -> str:
+    user = ""
+    if header.strip():
+        user += f"<info_rapat>\n{header.strip()}\n</info_rapat>\n\n"
+    user += f"<transkrip>\n{transcript}\n</transkrip>"
+    if context.strip():
+        user += f"\n\nKonteks tambahan dari pengguna: {context.strip()}"
+    return claude_text(SUMMARY_SYSTEM, user, api_key, model)
+
+
+def test_api_key(api_key: str, model: str = CLAUDE_MODEL) -> None:
+    """Raise if the key is rejected. Sends no meeting data."""
+    claude_text("Jawab dengan satu kata.", "ok", api_key, model, max_tokens=5)
+
+
 # --------------------------------------------------------------------------- export
 
-_INLINE = re.compile(r"(\*\*.+?\*\*(?!\*)|`[^`]+`)")
+_INLINE = re.compile(r"(\*\*.+?\*\*(?!\*)|`[^`]+`|(?<!\w)_[^_]+_(?!\w)|(?<![*\w])\*[^*\s][^*]*\*(?!\*))")
 
 
 def _add_inline(paragraph, text: str) -> None:
@@ -357,6 +548,8 @@ def _add_inline(paragraph, text: str) -> None:
             paragraph.add_run(re.sub(r"\*([^*]+)\*", r"\1", part[2:-2])).bold = True
         elif part.startswith("`") and part.endswith("`"):
             paragraph.add_run(part[1:-1]).font.name = "Menlo"
+        elif len(part) > 2 and part[0] in "_*" and part[-1] == part[0]:
+            paragraph.add_run(part[1:-1]).italic = True
         else:
             paragraph.add_run(part)
 
@@ -375,7 +568,7 @@ def markdown_to_docx(md: str, path: Path) -> None:
     while i < len(lines):
         line = lines[i].rstrip()
         stripped = line.strip()
-        if not stripped:
+        if not stripped or re.fullmatch(r"-{3,}", stripped):
             i += 1
             continue
         num = re.match(r"^(\d+)[.)]\s+", stripped)
@@ -423,8 +616,12 @@ def markdown_to_docx(md: str, path: Path) -> None:
     doc.save(str(path))
 
 
-def make_output_dir(source: Path) -> Path:
+def make_output_dir(source: Path, root: Path | None = None, when: dt.datetime | None = None) -> Path:
     stem = re.sub(r"[^\w\- ]+", "", source.stem).strip() or "Rapat"
-    folder = OUTPUT_ROOT / f"{dt.datetime.now():%Y-%m-%d %H%M} - {stem[:60]}"
-    folder.mkdir(parents=True, exist_ok=True)
+    base = f"{(when or dt.datetime.now()):%Y-%m-%d %H%M} - {stem[:60]}"
+    root = root or OUTPUT_ROOT
+    folder, n = root / base, 2
+    while folder.exists():
+        folder, n = root / f"{base} ({n})", n + 1
+    folder.mkdir(parents=True)
     return folder
