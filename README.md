@@ -11,6 +11,7 @@ Meeting Report mengubah rekaman suara atau video rapat menjadi tiga hal yang And
 - **Anda yang memilih AI-nya.** Anthropic, OpenAI, Gemini, server kompatibel OpenAI, atau Ollama lokal (tanpa internet). Tidak ada teks yang dikirim sebelum Anda konfirmasi.
 - **Transkrip yang bisa dipercaya.** Bagian suara yang terlewat Whisper ditranskrip ulang otomatis. Anda bisa edit, cari dan ganti, gabung atau pecah segmen, dan putar potongan suara per segmen.
 - **Setiap perubahan tercatat.** Setiap simpan membuat versi baru. Bandingkan versi mana pun per kata, lalu pulihkan dengan satu klik.
+- **Dengar sambil membaca.** Di tab Audio, Interactive Transcript berjalan mengikuti audio: kata yang sedang diucapkan disorot, dan satu klik pada kata memutar audio dari detik itu.
 - **Ramah buta warna.** Perbedaan tidak pernah ditandai dengan warna saja: dihapus merah dengan tanda −, ditambah biru dengan tanda +.
 
 ## Dibanding cara lain
@@ -30,6 +31,7 @@ Meeting Report mengubah rekaman suara atau video rapat menjadi tiga hal yang And
 2. **Tunggu transkripsi.** Pilih model **Cepat** (large-v3-turbo) atau **Akurat** (large-v3). Progres, perkiraan sisa waktu, dan log tampil langsung. Jendela boleh ditutup.
 3. **Tinjau dan tandai pembicara.** Tekan 1 sampai 9 untuk menandai pembicara. Terima atau tolak saran ejaan lokal.
 4. **Buat laporan.** Satu klik untuk ringkasan rapat, keputusan, dan tindak lanjut dengan PIC. Laporan ikut ditandai usang bila transkrip berubah sesudahnya.
+5. **Dengar ulang dengan Interactive Transcript.** Putar Audio bersih atau rekaman asli di tab Audio. Segmen yang sedang terdengar ditandai garis kiri dan ▶, kata yang sudah terdengar tampil terang, yang belum sedikit redup, dan kata yang sedang diucapkan diberi kapsul lembut bergaris bawah. Klik kata atau timestamp untuk memutar dari situ. Pintasan: Spasi putar/jeda, ← → 5 detik, ↑ ↓ segmen, F ikuti audio, W sorot per kata, [ ] kecepatan. Rapat yang diproses sebelum v1.6 memakai waktu kata perkiraan (label ≈).
 
 ## Hasil per rapat
 
@@ -41,7 +43,7 @@ Setiap rapat punya foldernya sendiri di `~/Documents/Meeting Report/`:
 | `Transkrip asli.txt` | Hasil Whisper, tidak pernah diubah |
 | `Ringkasan.md` / `.docx` | Laporan rapat terbaru |
 | `Audio bersih.m4a` | Rekaman tanpa bagian hening (opsional) |
-| `versions/`, `summaries/` | Semua versi transkrip dan laporan |
+| `versions/`, `summaries/` | Semua versi transkrip dan laporan, plus waktu tiap kata untuk Interactive Transcript |
 
 ## Instalasi
 
@@ -72,6 +74,7 @@ app/core.py      audio, buang hening, Whisper per bagian, penyedia AI, .docx
 app/store.py     folder rapat, versi, ringkasan
 app/filters.py   filter data sensitif dan pratinjau kirim
 app/suggest.py   saran kata lokal dan saran AI
+app/sync.py      Interactive Transcript di tab Audio: waktu kata per versi, peta waktu audio bersih
 app/jobs.py      worker transkripsi dan ringkasan, event SSE
 app/server.py    FastAPI dan keamanan lokal
 app/main.py      launcher .app

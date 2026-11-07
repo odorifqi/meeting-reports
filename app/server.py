@@ -24,10 +24,11 @@ from fastapi.staticfiles import StaticFiles
 import core
 import filters
 import jobs as jobs_mod
+import sync
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.6.0"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
@@ -502,15 +503,37 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             jb.whisper_lock.release()
         # the 1 s padding on each side lets Whisper hear whole words at the edges, but it
         # also hears the neighbouring segments again: keep only speech centred in the gap
-        out, outside = [], 0
+        out, outside, words = [], 0, []
         for s in segs or []:
             st_, en = lo + float(s["start"]), lo + float(s["end"])
             if a <= (st_ + en) / 2 <= b:
                 out.append({"start": round(max(st_, a - 1.0), 2), "end": round(min(en, b + 1.0), 2),
                             "text": s["text"], "low_words": s.get("low_words") or []})
+                words += core.shift_words(s.get("words"), lambda t: lo + t)
             else:
                 outside += 1
+        if words:
+            st.merge_words(mid, words, a, b)
         return {"segments": out, "outside": outside}
+
+    # ------------------------------------------------------------------ Interactive Transcript (v1.6)
+    @app.get("/api/meetings/{mid}/transcript-sync")
+    def transcript_sync_data(mid: str):
+        """Latest saved transcript with word timings and the Audio bersih time map."""
+        m = meta_or_404(mid)
+        try:
+            v = base_version(mid, m)
+        except KeyError:
+            raise HTTPException(409, "Transkrip belum tersedia")
+        p = st.path(mid)
+        return {
+            "rev": v.get("rev", 0), "created": v.get("created"), "rev_hash": m.get("rev_hash"),
+            "participants": v.get("participants") or m.get("participants") or [],
+            "segments": sync.align(v.get("segments") or [], st.read_words(mid)),
+            "has_words": st.read_words(mid) is not None,
+            "map": sync.clean_map(st.read_clean_map(mid), st.read_regions(mid), m,
+                                     (p / "Audio bersih.m4a").exists()),
+        }
 
     @app.put("/api/meetings/{mid}/draft")
     def put_draft(mid: str, body: dict = Body(...)):
@@ -563,6 +586,8 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         if m.get("status") == "awaiting_review":
             st.update(mid, status="done" if m.get("summaries") else "transcript_only")
         st.clear_draft(mid)
+        if res["changed"]:
+            bus.publish({"mid": mid, "kind": "version", "rev": res["rev"]})
         d = detail(mid)
         return {"changed": res["changed"], "rev": res["rev"],
                 "changes_text": store_mod.change_text(res.get("changes") or {}), "meeting": d}
@@ -574,6 +599,8 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             res = st.restore_version(mid, int(body.get("rev")))
         except (KeyError, TypeError, ValueError):
             raise HTTPException(404, "Versi tidak ditemukan")
+        if res["changed"]:
+            bus.publish({"mid": mid, "kind": "version", "rev": res["rev"]})
         return {"changed": res["changed"], "rev": res["rev"], "meeting": detail(mid)}
 
     # ------------------------------------------------------------------ AI provider: preview, summary, suggest

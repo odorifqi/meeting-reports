@@ -1,5 +1,5 @@
 #!/bin/bash
-# Meeting Report v1.3, jalankan dari repo (untuk pengembangan).
+# Meeting Report v1.6, jalankan dari repo (untuk pengembangan).
 #   ./run.sh dev     server dengan auto-reload, dibuka di Chrome (seperti "npm run dev")
 #   ./run.sh app     jendela Mac (pywebview) memakai kode di repo ini
 #   ./run.sh test    jalankan tes

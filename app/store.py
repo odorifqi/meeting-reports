@@ -32,6 +32,8 @@ DRAFT = "draft.json"
 VERS = "versions"
 SUMS = "summaries"
 REGIONS = "regions.json"     # speech regions of the recording (original timeline), in versions/
+WORDS = "words.json"         # NOTE: outside the version files, so content hashes stay the same
+CLEAN_MAP = "clean_map.json"
 MIGRATED = ".folders-v2.1"   # marker: folders already renamed to "date - title"
 
 STATUSES = ("queued", "transcribing", "awaiting_review", "awaiting_confirmation",
@@ -320,8 +322,10 @@ class Store:
                          "speaker_id": None, "secret": False,
                          "avg_logprob": s.get("avg_logprob"), "low_words": s.get("low_words") or [],
                          **({"gap_fill": True} if s.get("gap_fill") else {})})
+        words = [w for s in segments for w in (s.get("words") or [])]
         with self.lock:
             m = self.meta(mid)
+            self.save_words(mid, words)
             _write_json(p / VERS / "rev-0.json", {"rev": 0, "created": now_iso(), "source": "whisper",
                                                  "segments": segs, "participants": m["participants"]})
             m.update(meta_updates)
@@ -554,6 +558,40 @@ class Store:
 
     def read_regions(self, mid: str) -> dict | None:
         return _read_json(self.path(mid) / VERS / REGIONS)
+
+    # ---------------------------------------------------------------- Interactive Transcript data (v1.6)
+    def save_clean_map(self, mid: str, mapping: list, clean_sec: float) -> None:
+        """Rows (clean_start, orig_start, dur) of the Audio bersih.m4a written in this run."""
+        d = self.path(mid) / VERS
+        d.mkdir(parents=True, exist_ok=True)
+        _write_json(d / CLEAN_MAP, {"created": now_iso(), "clean_sec": round(float(clean_sec), 3),
+                                    "rows": [[round(float(c), 3), round(float(o), 3), round(float(n), 3)]
+                                             for c, o, n in mapping]})
+
+    def read_clean_map(self, mid: str) -> dict | None:
+        return _read_json(self.path(mid) / VERS / CLEAN_MAP)
+
+    def read_words(self, mid: str) -> list | None:
+        """Flat [start, end, word] rows sorted by time, or None for meetings made before v1.6."""
+        d = _read_json(self.path(mid) / VERS / WORDS)
+        return d.get("words") if isinstance(d, dict) else None
+
+    def save_words(self, mid: str, words: list) -> None:
+        d = self.path(mid) / VERS
+        d.mkdir(parents=True, exist_ok=True)
+        rows = sorted(([round(float(a), 2), round(float(b), 2), str(w)] for a, b, w in words), key=lambda r: r[0])
+        # NOTE: compact JSON, a 3-hour meeting has ~25,000 words
+        tmp = d / (WORDS + ".tmp")
+        tmp.write_text(json.dumps({"words": rows}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, d / WORDS)
+
+    def merge_words(self, mid: str, words: list, a: float, b: float) -> None:
+        """Words found by "Transkrip ulang bagian ini": replace what was between a and b."""
+        old = self.read_words(mid) or []
+        keep = [w for w in old if not (a <= (w[0] + w[1]) / 2 <= b)]
+        new = [w for w in words if a <= (w[0] + w[1]) / 2 <= b]
+        with self.lock:
+            self.save_words(mid, keep + new)
 
     # ---------------------------------------------------------------- delete
     def trash(self, mid: str) -> None:

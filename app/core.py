@@ -235,6 +235,25 @@ class CleanResult:
         offset = min(max(t_clean - row[0], 0.0), row[2])
         return row[1] + offset
 
+    def to_clean(self, t_orig: float) -> float:
+        """Map a timestamp in the original recording to the cleaned audio.
+
+        A moment inside a removed silence maps to the start of the next kept span."""
+        return to_clean(self.mapping, t_orig)
+
+
+def to_clean(mapping, t_orig: float) -> float:
+    """Original-recording time to cleaned-audio time for mapping rows (clean_start, orig_start, dur)."""
+    if not mapping:
+        return t_orig
+    for c0, o0, d in mapping:
+        if t_orig < o0:
+            return c0
+        if t_orig <= o0 + d:
+            return c0 + (t_orig - o0)
+    c0, _, d = mapping[-1]
+    return c0 + d
+
 
 def detect_speech(audio: np.ndarray, min_silence: float = 2.0, pad: float = 0.4,
                   threshold_db: float | None = None) -> tuple[list[tuple[float, float]], float]:
@@ -394,19 +413,28 @@ def transcribe_chunk(audio: np.ndarray, language: str | None, prompt: str | None
         if _finite(s.get("no_speech_prob")) is not None and s.get("no_speech_prob") > 0.6 \
                 and lp is not None and lp < -1.0:
             continue
-        low = []
+        low, words = [], []
         for w in s.get("words") or []:
             word = str(w.get("word", "")).strip()
             if word and float(w.get("probability", 1.0)) < LOW_WORD_PROB:
                 low.append(word.strip(".,?!;:"))
+            ws, we = _finite(w.get("start")), _finite(w.get("end"))
+            if word and ws is not None and we is not None:
+                words.append([ws, max(ws, we), word])
         out.append({
             "start": float(s["start"]),
             "end": float(s["end"]),
             "text": text,
             "avg_logprob": round(lp, 3) if lp is not None else None,
             "low_words": [w for w in low if w],
+            "words": words,
         })
     return out
+
+
+def shift_words(words, f) -> list:
+    """Apply a time function to [start, end, word] rows (chunk offset, clean to original)."""
+    return [[round(f(w[0]), 2), round(f(w[1]), 2), w[2]] for w in words or []]
 
 
 def _finite(x) -> float | None:
@@ -451,7 +479,8 @@ def fill_gaps(audio: np.ndarray, segs: list[dict], transcribe, min_gap: float = 
             st, en = lo + s["start"], lo + s["end"]
             mid = (st + en) / 2
             if a <= mid <= b:
-                found.append({**s, "start": round(st, 2), "end": round(min(en, hi), 2), "gap_fill": True})
+                found.append({**s, "start": round(st, 2), "end": round(min(en, hi), 2), "gap_fill": True,
+                              "words": shift_words(s.get("words"), lambda t, lo=lo: lo + t)})
         out.extend(found)
         report.append((a, b, len(found)))
     out.sort(key=lambda x: x["start"])
@@ -464,7 +493,8 @@ def place_chunk(clean: CleanResult, chunk_start_sample: int, segs: list[dict]) -
     placed = []
     for s in segs:
         placed.append({**s, "start": round(clean.to_original(base + s["start"]), 2),
-                       "end": round(clean.to_original(base + s["end"]), 2)})
+                       "end": round(clean.to_original(base + s["end"]), 2),
+                       "words": shift_words(s.get("words"), lambda t: clean.to_original(base + t))})
     return placed
 
 

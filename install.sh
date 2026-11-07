@@ -1,5 +1,5 @@
 #!/bin/bash
-# Installer Meeting Report v1.3 untuk macOS (Apple Silicon).
+# Installer Meeting Report v1.6 untuk macOS (Apple Silicon).
 # Jalankan dari Terminal di folder repo:  ./install.sh
 # Aman diulang. Versi v1 (Tkinter) disimpan sebagai cadangan di app-v1/.
 set -euo pipefail

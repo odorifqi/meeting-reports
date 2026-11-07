@@ -272,6 +272,8 @@ class Jobs:
                     not (folder / "Audio bersih.m4a").exists():
                 try:
                     self.save_m4a(clean.audio, folder / "Audio bersih.m4a")
+                    # NOTE: the map describes this file, so it is written only together with it
+                    st.save_clean_map(mid, clean.mapping, clean.clean_sec)
                     self._log(mid, "Audio bersih disimpan")
                 except Exception as exc:  # noqa: BLE001 - optional output
                     self._log(mid, f"Audio bersih gagal disimpan ({type(exc).__name__})")

@@ -60,14 +60,22 @@ def fake_chunk(audio, language, prompt, repo, wc):
         if threading.current_thread().name == "mn-worker":
             return []
         time.sleep(0.8)
-        return [{"start": min(1.0, n / 4), "end": max(n - 1.0, n * 3 / 4),
-                 "text": "Untuk wilayah timur kami usulkan pendampingan tambahan.", "avg_logprob": -0.4,
-                 "low_words": []}]
+        a, b = min(1.0, n / 4), max(n - 1.0, n * 3 / 4)
+        t = "Untuk wilayah timur kami usulkan pendampingan tambahan."
+        return [{"start": a, "end": b, "text": t, "avg_logprob": -0.4, "low_words": [], "words": fake_words(t, a, b)}]
     time.sleep(1.5)
     k = len(LINES)
     skip = {5, 6} if n > 15 else set()   # Whisper skipped a stretch here
-    return [{"start": i * n / k, "end": (i + 0.9) * n / k, "text": t, "avg_logprob": -0.3, "low_words": lw}
+    return [{"start": i * n / k, "end": (i + 0.9) * n / k, "text": t, "avg_logprob": -0.3, "low_words": lw,
+             "words": fake_words(t, i * n / k, (i + 0.9) * n / k)}
             for i, (t, lw) in enumerate(LINES) if i not in skip]
+
+
+def fake_words(text, a, b):
+    """Whisper-like word timings spread over the segment."""
+    toks = text.split()
+    d = (b - a) / max(1, len(toks))
+    return [[a + k * d, a + (k + 0.85) * d, " " + w] for k, w in enumerate(toks)]
 
 
 def fake_claude(system, user, key, model, max_tokens):
@@ -106,10 +114,19 @@ Rapat membahas realisasi KUR dan kenaikan NPL wilayah timur. Dana ke ‹REKENING
 """
 
 
+def save_m4a(a, p):
+    """Real file when ffmpeg is here, so the Audio tab can play it."""
+    import shutil
+    if shutil.which("ffmpeg"):
+        core.save_audio_m4a(a, Path(p))
+    else:
+        Path(p).write_bytes(b"")
+
+
 st = store_mod.Store(root / "out")
 bus = jobs_mod.Bus()
 jb = jobs_mod.Jobs(st, bus, load_audio=fake_audio, transcribe_chunk=fake_chunk, model_ready=lambda r: True,
-                   save_m4a=lambda a, p: Path(p).write_bytes(b""), claude=fake_claude,
+                   save_m4a=save_m4a, claude=fake_claude,
                    api_key=lambda p=None: "sk-ant-demo")
 # small chunks so progress has several parts
 core.CHUNK_SEC = 20

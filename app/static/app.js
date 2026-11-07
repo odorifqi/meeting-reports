@@ -1,4 +1,4 @@
-/* Meeting Report v1.3 UI (was Meeting Notes v1.2). Plain JS, no build step, no external requests.
+/* Meeting Report v1.6 UI (was Meeting Notes v1.2). Plain JS, no build step, no external requests.
    Screens follow the approved hi-fi prototype: S1 Riwayat, S2 Rapat baru, S3/S3b progres,
    S4 tinjau / S4b edit transkrip, S4c bandingkan, S5 meringkas, S6 detail (transkrip,
    ringkasan, audio), S6e/S6f riwayat versi, S7 pengaturan, sheets M1 M2 M2b M4 M5. */
@@ -209,6 +209,7 @@ async function openMeeting(r) {
   }
   if (view === 'transkrip') await loadVersion(S.vsel);
   if (view === 'ringkasan') await loadSummary(S.ssel);
+  if (view === 'audio') await syncLoad(true);
   if (view === 'tinjau' || view === 'edit') { if (!S.ed || S.ed.mid !== m.id || S.ed.stale) await loadEditor(view); }
   if (view === 'bandingkan' && (!S.ed || S.ed.mid !== m.id)) await loadEditor(m.transcript_rev ? 'edit' : 'tinjau');
   if (view === 'bandingkan') await loadDiffLeft();
@@ -245,7 +246,7 @@ function onEvent(ev) {
     try {
       await loadState();
       if (S.route.name === 'list') await loadList();
-      if (cur && ['status', 'done', 'queued'].includes(ev.kind)) {
+      if (cur && (['status', 'done', 'queued'].includes(ev.kind) || (ev.kind === 'version' && S.route.view === 'audio'))) {
         const before = S.m.status;
         S.m = await api(`/api/meetings/${encodeURIComponent(ev.mid)}`);
         const v = S.route.view;
@@ -256,6 +257,7 @@ function onEvent(ev) {
           if (S.m.status === 'failed' && v === 'progres') { render(); return; }
         }
       }
+      if (cur && S.route.view === 'audio') await syncLoad();
       render();
     } catch (e) { /* server restarting: ignore */ }
   }, 150);
@@ -1159,9 +1161,9 @@ function S6c() {
   };
   const asli = m.audio.asli ? player('asli', 'Rekaman asli', `${ic('info', 'sm')}Timestamp transkrip mengacu ke rekaman asli. ${esc(m.source_name || '')}`)
     : `<div class="banner warn">${ic('warn')}<span class="grow">Rekaman asli tidak ditemukan di lokasi awalnya${m.source_name ? ` (${esc(m.source_name)})` : ''}. Pemutaran per segmen butuh rekaman asli.</span></div>`;
-  const bersih = m.audio.bersih ? player('bersih', 'Audio bersih', `${ic('check', 'sm')}${m.duration_sec && m.clean_sec ? fmtDur(m.duration_sec - m.clean_sec) + ' hening dibuang · ' : ''}Audio bersih.m4a <button class="btn ghost" data-act="finder" data-file="Audio bersih.m4a" style="height:22px">${ic('folder', 'sm')}Tampilkan di Finder</button>`)
+  const bersih = m.audio.bersih ? player('bersih', 'Audio bersih', `${ic('check', 'sm')}${m.duration_sec && m.clean_sec ? fmtDur(m.duration_sec - m.clean_sec) + ' hening dibuang · ' : ''}Di rekaman asli <b class="mono" id="ap-orig">–</b> · Audio bersih.m4a <button class="btn ghost" data-act="finder" data-file="Audio bersih.m4a" style="height:22px">${ic('folder', 'sm')}Tampilkan di Finder</button>`)
     : `<div class="banner">${ic('info')}<span class="grow">Audio bersih tidak disimpan untuk rapat ini.</span></div>`;
-  return dhead('audio') + `<div class="dbody one"><div class="dmain" style="max-width:900px">${asli}${bersih}</div></div>`;
+  return dhead('audio') + `<div class="dbody one"><div class="dmain kmain">${asli}${bersih}<div id="sync-slot"></div></div></div>`;
 }
 function patchAudio() {
   const m = S.m; if (!m) return;
@@ -1173,6 +1175,276 @@ function patchAudio() {
     if (b && !S.scrub) { b.style.width = `${len ? (audio.currentTime / len * 100).toFixed(2) : 0}%`; b.parentElement.setAttribute('aria-valuenow', Math.round(audio.currentTime)); b.parentElement.setAttribute('aria-valuetext', fmtDur(audio.currentTime)); }
   });
 }
+
+/* ------------------------------------------------------------------ Interactive Transcript (v1.6) */
+const KLEAD = 0.08;   // NOTE: Whisper word times run a little late
+const K = { mid: null, data: null, pending: null, el: null, list: null, rows: [], ord: [], starts: null, cut: [],
+  cur: -1, curW: -1, past: -1, follow: true, word: true, scroll: 0, progUntil: 0, raf: 0, io: null,
+  mapBad: false, err: null, loading: null };
+try { K.word = localStorage.getItem('mn-sync-word') !== '0'; } catch (e) { /* storage blocked */ }
+const kToks = t => String(t || '').split(/\s+/).filter(Boolean);
+function kRows() { return (K.data && K.data.map && K.data.map.rows) || []; }
+function kMapUsable() { return kRows().length > 0 && !K.mapBad; }
+function kToOrig(t) {
+  const rows = kRows(); if (!rows.length) return t;
+  let lo = 0, hi = rows.length - 1, r = 0;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (rows[m][0] <= t) { r = m; lo = m + 1; } else hi = m - 1; }
+  const row = rows[r]; return row[1] + Math.min(Math.max(t - row[0], 0), row[2]);
+}
+function kToClean(o) {
+  const rows = kRows(); if (!rows.length) return o;
+  let lo = 0, hi = rows.length - 1, r = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (rows[m][1] <= o) { r = m; lo = m + 1; } else hi = m - 1; }
+  if (r < 0) return rows[0][0];
+  const row = rows[r];
+  if (o <= row[1] + row[2]) return row[0] + (o - row[1]);
+  return r + 1 < rows.length ? rows[r + 1][0] : row[0] + row[2];
+}
+function kKind() {
+  const m = S.m; if (!m) return null;
+  if (audio.dataset.src === audioUrl(m.id, 'bersih')) return 'bersih';
+  if (audio.dataset.src === audioUrl(m.id, 'asli')) return 'asli';
+  return null;
+}
+function kPos() {
+  const k = kKind(); if (!k || audio.readyState < 1) return null;
+  if (k === 'asli') return audio.currentTime;
+  return kMapUsable() ? kToOrig(audio.currentTime) : null;
+}
+async function syncLoad(quiet) {
+  const m = S.m; if (!m) return;
+  const mid = m.id;
+  let d;
+  try { d = await api(`/api/meetings/${encodeURIComponent(mid)}/transcript-sync`); K.err = null; }
+  catch (e) { if (K.mid !== mid) { K.mid = mid; K.data = null; K.el = null; } K.err = e.status === 409 ? 'Transkrip belum tersedia untuk rapat ini.' : e.message; return; }
+  if (!S.m || S.m.id !== mid) return;
+  if (K.mid !== mid || !K.data) { kAdopt(mid, d); return; }
+  if (d.rev === K.data.rev && d.rev_hash === K.data.rev_hash) return;
+  const sameText = JSON.stringify(d.segments.map(s => [s.id, s.text, s.start])) === JSON.stringify(K.data.segments.map(s => [s.id, s.text, s.start]));
+  if (sameText) { kAdopt(mid, d); if (!quiet) toast(`Transkrip diperbarui ke versi ${d.rev}`, null, 'info'); return; }
+  // NOTE: new text waits while audio plays, so words do not jump under the listener
+  if (kKind() && !audio.paused) { K.pending = d; kPatchTool(); return; }
+  kAdopt(mid, d); if (!quiet) toast(`Transkrip diperbarui ke versi ${d.rev}`, null, 'info');
+}
+function kAdopt(mid, d) {
+  const keepId = K.data && K.cur >= 0 && K.data.segments[K.cur] ? K.data.segments[K.cur].id : null;
+  const keepTop = K.list && keepId ? (() => { const r = K.rows[K.cur]; return r ? r.offsetTop - K.list.scrollTop : null; })() : null;
+  if (K.mid !== mid) { K.follow = true; K.scroll = 0; K.mapBad = false; }
+  K.mid = mid; K.data = d; K.pending = null; K.cur = -1; K.curW = -1; K.past = -1;
+  K.anchor = keepId && keepTop != null ? { id: keepId, top: keepTop } : null;
+  kBuild();
+}
+function kVerText(d) {
+  const when = d.created ? ` · disimpan ${fmtDT(d.created)}` : '';
+  return d.rev ? `Transkrip v${d.rev}${when}` : `Transkrip asli Whisper (belum ditinjau)${when}`;
+}
+function kToolHTML() {
+  const d = K.data, m = S.m;
+  const notes = [];
+  if (m && m.has_draft) notes.push(`<span class="knote">${ic('pencil', 'sm')}Ada editan yang belum disimpan. Yang tampil versi tersimpan.</span>`);
+  if (!d.has_words) notes.push(`<span class="knote est" title="Rapat ini diproses sebelum v1.6, jadi waktu tiap kata dihitung dari panjang kata.">≈ Waktu kata diperkirakan</span>`);
+  if (m && m.audio && m.audio.bersih && !kMapUsable()) notes.push(`<span class="knote warn">${ic('warn', 'sm')}${K.mapBad ? 'Audio bersih tidak cocok dengan peta waktunya' : 'Peta waktu audio bersih tidak ada'}. Sorotan hanya mengikuti Rekaman asli.</span>`);
+  const pend = K.pending ? `<div class="banner warn kpend">${ic('info')}<span class="grow"><b>Versi ${K.pending.rev} tersedia.</b> Yang tampil masih v${d.rev} supaya teks tidak berubah saat sedang didengar.</span><button class="btn pri" data-k="loadPending">Muat v${K.pending.rev}</button></div>` : '';
+  return `<div class="khead"><h3>Interactive Transcript</h3><span>Baca sambil dengar. Klik kata untuk memutar dari situ.</span></div><div class="ktool"><span class="kver">${ic('doc', 'sm')}${esc(kVerText(d))}</span>${notes.join('')}<span class="grow"></span><label class="kopt"><input type="checkbox" data-k="word"${K.word ? ' checked' : ''}> Sorot per kata <kbd>W</kbd></label><label class="kopt"><input type="checkbox" data-k="follow"${K.follow ? ' checked' : ''}> Ikuti audio <kbd>F</kbd></label></div>${pend}`;
+}
+function kPatchTool() { if (!K.el) return; const t = K.el.querySelector('.ktop'); if (t) t.innerHTML = kToolHTML(); }
+function kBuild() {
+  const d = K.data, segs = d.segments;
+  const names = nameMap(d.participants), hasParts = (d.participants || []).length > 0;
+  const rows = kRows();
+  K.cut = segs.map(s => rows.length > 0 && !rows.some(r => r[1] < s.end - 0.05 && r[1] + r[2] > s.start + 0.05));
+  const html = segs.map((s, i) => {
+    const prev = segs[i - 1];
+    const cont = prev && (prev.speaker_id || null) === (s.speaker_id || null) && (!!names[prev.speaker_id] === !!names[s.speaker_id]);
+    const nm = names[s.speaker_id];
+    const who = hasParts ? `<span class="who${nm ? '' : ' none'}"><span class="av" aria-hidden="true">${nm ? esc(nm.trim()[0] || '?') : '?'}</span><span class="nm">${nm ? esc(nm) : 'Belum ditandai'}</span></span>` : '';
+    const extra = (s.secret ? ` <span class="pill p-neutral klock">${ic('lock', 'sm')}Rahasia</span>` : '') + (K.cut[i] ? ` <span class="kcut">${ic('info', 'sm')}Tidak ada di audio bersih</span>` : '') + (s.est && d.has_words ? ' <span class="kest" title="Waktu kata di segmen ini diperkirakan">≈</span>' : '');
+    const cutSec = prev && rows.length ? (s.start - prev.end) - (kToClean(s.start) - kToClean(prev.end)) : 0;
+    const gap = cutSec > 1 ? `<div class="kgap" aria-hidden="true">${Math.round(cutSec)} dtk hening dibuang</div>` : '';
+    return gap + `<div class="kseg${cont ? ' cont' : ''}${hasParts ? '' : ' noparts'}" role="listitem" data-i="${i}"><button class="ts" data-i="${i}" title="Putar dari ${fmtTs(s.start)}">${fmtTs(s.start)}</button>${who}<span class="txt">${esc(kToks(s.text).join(' '))}</span>${extra ? `<span class="kx">${extra}</span>` : ''}</div>`;
+  }).join('') || '<div class="muted" style="padding:20px">Transkrip ini kosong.</div>';
+  const el = document.createElement('div');
+  el.className = 'card tsync';
+  el.innerHTML = `<div class="ktop">${kToolHTML()}</div><div class="kwrap"><div class="klist" role="list" aria-label="Transkrip mengikuti audio">${html}</div><button class="btn pri kfollow" data-k="followOn" hidden></button></div><div class="khint"><span><kbd>Spasi</kbd> putar/jeda</span><span><kbd>←</kbd><kbd>→</kbd> 5 dtk (<kbd>Shift</kbd> 30)</span><span><kbd>↑</kbd><kbd>↓</kbd> segmen sebelum/berikut</span><span><kbd>F</kbd> ikuti audio</span><span><kbd>W</kbd> sorot kata</span><span><kbd>[</kbd><kbd>]</kbd> kecepatan</span></div>`;
+  K.el = el; K.list = el.querySelector('.klist');
+  K.list.classList.toggle('noword', !K.word);
+  K.rows = [...K.list.querySelectorAll('.kseg')];
+  K.ord = segs.map((s, i) => i).sort((a, b) => segs[a].start - segs[b].start);
+  K.starts = Float64Array.from(K.ord.map(i => segs[i].start));
+  K.expanded = new Uint8Array(segs.length);
+  if (K.io) K.io.disconnect();
+  // NOTE: word spans only near the viewport keep a 3-hour transcript light
+  K.io = 'IntersectionObserver' in window ? new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) kExpand(+e.target.dataset.i); }), { root: K.list, rootMargin: '900px 0px' }) : null;
+  if (K.io) K.rows.forEach(r => K.io.observe(r)); else K.rows.forEach((r, i) => kExpand(i));
+  const user = () => { if (K.follow) kSetFollow(false); };
+  K.list.addEventListener('wheel', user, { passive: true });
+  K.list.addEventListener('touchmove', user, { passive: true });
+  K.list.addEventListener('scroll', () => { K.scroll = K.list.scrollTop; if (performance.now() > K.progUntil && K.follow) kSetFollow(false); else kFollowBtn(); }, { passive: true });
+  K.list.addEventListener('click', ev => {
+    const sel = window.getSelection && window.getSelection(); if (sel && String(sel).trim()) return;
+    const row = ev.target.closest('.kseg'); if (!row) return;
+    const i = +row.dataset.i, s = K.data.segments[i];
+    const w = ev.target.closest('.w');
+    const t = w && s.w[+w.dataset.k] ? s.w[+w.dataset.k][0] : s.start;
+    kSeek(t, true, i);
+  });
+  el.addEventListener('click', ev => {
+    const b = ev.target.closest('[data-k]'); if (!b || b.tagName === 'INPUT') return;
+    if (b.dataset.k === 'followOn') kSetFollow(true);
+    if (b.dataset.k === 'loadPending' && K.pending) { kAdopt(K.mid, K.pending); render(); }
+  });
+  el.addEventListener('change', ev => {
+    const k = ev.target.dataset.k;
+    if (k === 'word') kSetWord(ev.target.checked);
+    if (k === 'follow') kSetFollow(ev.target.checked);
+  });
+}
+function kExpand(i) {
+  if (K.expanded[i]) return;
+  const r = K.rows[i], s = K.data.segments[i]; if (!r || !s) return;
+  K.expanded[i] = 1;
+  r.querySelector('.txt').innerHTML = kToks(s.text).map((t, k) => `<span class="w" data-k="${k}">${esc(t)}</span>`).join(' ');
+}
+function kMount() {
+  if (S.route.name !== 'meeting' || S.route.view !== 'audio') return;
+  const slot = document.getElementById('sync-slot'); if (!slot) return;
+  if (K.err || !K.el || K.mid !== (S.m && S.m.id)) {
+    slot.innerHTML = K.err ? `<div class="banner">${ic('info')}<span class="grow">${esc(K.err)}</span></div>` : '<div class="loading"><span class="spinner"></span></div>';
+    return;
+  }
+  kPatchTool();
+  const old = document.querySelector('.tsync'); if (old && old !== K.el) old.remove();
+  slot.replaceWith(K.el);
+  K.progUntil = performance.now() + 300;
+  if (K.anchor) {
+    const i = K.data.segments.findIndex(s => s.id === K.anchor.id);
+    if (i >= 0) K.scroll = Math.max(0, K.rows[i].offsetTop - K.anchor.top);
+    K.anchor = null;
+  }
+  K.list.scrollTop = K.scroll;
+  karUpdate(true);
+}
+function kSetFollow(f) {
+  K.follow = f;
+  const c = K.el && K.el.querySelector('[data-k="follow"]'); if (c) c.checked = f;
+  if (f) kScroll();
+  kFollowBtn();
+}
+function kSetWord(on) {
+  K.word = on; try { localStorage.setItem('mn-sync-word', on ? '1' : '0'); } catch (e) { /* ignore */ }
+  if (K.list) K.list.classList.toggle('noword', !on);
+  const c = K.el && K.el.querySelector('[data-k="word"]'); if (c) c.checked = on;
+  K.curW = -2; karUpdate();
+}
+function kVisible(i) {
+  const r = K.rows[i]; if (!r) return true;
+  const a = r.offsetTop, b = a + r.offsetHeight;
+  return b > K.list.scrollTop + 8 && a < K.list.scrollTop + K.list.clientHeight - 8;
+}
+function kFollowBtn() {
+  const b = K.el && K.el.querySelector('.kfollow'); if (!b) return;
+  if (K.follow || K.cur < 0 || kVisible(K.cur)) { b.hidden = true; return; }
+  const below = K.rows[K.cur].offsetTop > K.list.scrollTop + K.list.clientHeight / 2;
+  b.textContent = `Ikuti audio ${below ? '↓' : '↑'}`;
+  b.hidden = false;
+}
+function kScroll() {
+  if (!K.list || K.cur < 0 || !K.list.isConnected) return;
+  const r = K.rows[K.cur];
+  const top = Math.max(0, r.offsetTop - K.list.clientHeight * 0.3);
+  if (Math.abs(top - K.list.scrollTop) < 4) return;
+  K.progUntil = performance.now() + 900;
+  const reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const far = Math.abs(top - K.list.scrollTop) > K.list.clientHeight * 3;
+  K.list.scrollTo({ top, behavior: reduce || far ? 'auto' : 'smooth' });
+}
+function kFind(o) {
+  let lo = 0, hi = K.starts.length - 1, r = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (K.starts[m] <= o) { r = m; lo = m + 1; } else hi = m - 1; }
+  return r < 0 ? -1 : K.ord[r];
+}
+function karUpdate(force) {
+  if (!K.el || !K.el.isConnected || !K.data) return;
+  const o = kPos();
+  const og = document.getElementById('ap-orig'); if (og) og.textContent = kKind() === 'bersih' && o != null ? fmtTs(o) : '–';
+  const i = o == null ? -1 : kFind(o + KLEAD);
+  if (i !== K.cur || force) {
+    if (K.cur >= 0 && K.rows[K.cur]) { K.rows[K.cur].classList.remove('on'); K.rows[K.cur].removeAttribute('aria-current'); }
+    const np = i < 0 ? -1 : i;
+    if (np !== K.past) {
+      const a = Math.min(np, K.past) + 1, b = Math.max(np, K.past);
+      for (let k = Math.max(0, a - 1); k <= b && k < K.rows.length; k++) K.rows[k].classList.toggle('past', k < np);
+      K.past = np;
+    }
+    K.cur = i; K.curW = -2;
+    if (i >= 0) {
+      const r = K.rows[i]; kExpand(i); r.classList.add('on'); r.setAttribute('aria-current', 'true');
+      if (K.follow) kScroll();
+    }
+    kFollowBtn();
+  }
+  let w = -1;
+  if (K.word && i >= 0) {
+    const s = K.data.segments[i];
+    if (o + KLEAD <= s.end + 0.05) for (let k = 0; k < s.w.length; k++) { if (s.w[k][0] <= o + KLEAD) w = k; else break; }
+  }
+  if (w !== K.curW) {
+    const prev = K.list.querySelector('.w.on'); if (prev) prev.classList.remove('on');
+    if (i >= 0) {
+      const s = K.data.segments[i], heard = w >= 0 ? w : o + KLEAD > s.end ? s.w.length : 0;
+      K.rows[i].querySelectorAll('.w').forEach((el, k) => el.classList.toggle('done', k < heard));
+      if (w >= 0) { const el = K.rows[i].querySelector(`.w[data-k="${w}"]`); if (el) el.classList.add('on'); }
+    }
+    K.curW = w;
+  }
+}
+function kLoop() {
+  cancelAnimationFrame(K.raf);
+  const step = () => { if (audio.paused || S.route.view !== 'audio') return; karUpdate(); K.raf = requestAnimationFrame(step); };
+  K.raf = requestAnimationFrame(step);
+}
+function kSeek(o, play, i) {
+  const m = S.m; if (!m) return;
+  let kind = kKind();
+  const canB = m.audio.bersih && kMapUsable(), canA = m.audio.asli;
+  if (!kind) kind = canB ? 'bersih' : canA ? 'asli' : null;
+  if (kind === 'bersih' && (!canB || (i != null && K.cut[i]))) kind = canA ? 'asli' : null;
+  if (!kind) { toast(m.audio.asli || m.audio.bersih ? 'Bagian ini tidak bisa diputar dari audio yang ada' : 'Rekaman asli tidak ditemukan di lokasi awalnya', null, 'bad'); return; }
+  const src = audioUrl(m.id, kind), t = kind === 'bersih' ? kToClean(o) + 0.001 : o;
+  const wasPlaying = !audio.paused;
+  stopAt = null;
+  if (!K.follow) kSetFollow(true);
+  seekTo(src, t, () => {
+    if (play || wasPlaying) audio.play().catch(() => toast('Audio tidak bisa diputar', null, 'bad'));
+    karUpdate(true); patchAudio();
+  });
+  if (audio.dataset.src !== src || (play && !wasPlaying)) setTimeout(render, 60);
+}
+function kStep(d) {
+  if (!K.data || !K.data.segments.length) return;
+  const o = kPos();
+  const segs = K.data.segments;
+  let j;
+  if (K.cur < 0) j = 0;
+  else if (d < 0 && o != null && o - segs[K.cur].start > 1) j = K.cur;
+  else { const p = K.ord.indexOf(K.cur) + d; j = K.ord[Math.max(0, Math.min(K.ord.length - 1, p))]; }
+  kSeek(segs[j].start, false, j);
+}
+audio.addEventListener('play', () => { if (S.route.view === 'audio') kLoop(); });
+audio.addEventListener('pause', () => {
+  cancelAnimationFrame(K.raf);
+  if (S.route.view !== 'audio') return;
+  karUpdate();
+  if (K.pending) { const d = K.pending; kAdopt(K.mid, d); toast(`Transkrip diperbarui ke versi ${d.rev}`, null, 'info'); render(); }
+});
+audio.addEventListener('seeked', () => { if (S.route.view === 'audio') karUpdate(true); });
+audio.addEventListener('loadedmetadata', () => {
+  const m = S.m; if (!m || !K.data || audio.dataset.src !== audioUrl(m.id, 'bersih')) return;
+  const mp = K.data.map;
+  // NOTE: a re-run keeps an older Audio bersih.m4a, so the map must match this file
+  const bad = !!(mp && mp.clean_sec && isFinite(audio.duration) && Math.abs(audio.duration - mp.clean_sec) > 0.5);
+  if (bad !== K.mapBad) { K.mapBad = bad; kBuild(); if (S.route.view === 'audio') render(); }
+});
 
 /* ------------------------------------------------------------------ S5 meringkas */
 function S5() {
@@ -1397,6 +1669,7 @@ function render() {
   if (fid) { const el = document.getElementById(fid); if (el) { el.focus(); if (sel && el.setSelectionRange) try { el.setSelectionRange(sel[0], sel[1]); } catch (e) { /* not text */ } } }
   const ren = app.querySelector('[id^="ren-"]'); if (ren && !fid) ren.focus();
   const ti = $('#ttl-in'); if (ti && !fid) { ti.focus(); ti.setSelectionRange(ti.value.length, ti.value.length); }
+  kMount();
 }
 
 /* ------------------------------------------------------------------ actions */
@@ -1866,6 +2139,25 @@ document.addEventListener('keydown', ev => {
     const d = (ev.key === 'ArrowLeft' ? -1 : 1) * (ev.shiftKey ? 30 : 5);
     const kind = t.dataset && t.dataset.scrub ? t.dataset.scrub : inEd ? 'asli' : S.route.view === 'audio' ? (audio.dataset.src === audioUrl(S.m.id, 'bersih') ? 'bersih' : 'asli') : null;
     if (kind && (kind !== 'asli' || (S.m.audio && S.m.audio.asli))) { ev.preventDefault(); nudge(kind, d); return; }
+  }
+  if (S.route.name === 'meeting' && S.route.view === 'audio' && S.m && K.data && !typing && !S.modal && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+    const k = ev.key;
+    if (k === ' ') {
+      ev.preventDefault();
+      const kind = kKind() || (S.m.audio.bersih ? 'bersih' : S.m.audio.asli ? 'asli' : null);
+      if (kind) A.aplay({ dataset: { a: kind } });
+      return;
+    }
+    if (k === 'ArrowUp' || k === 'ArrowDown') { ev.preventDefault(); kStep(k === 'ArrowUp' ? -1 : 1); return; }
+    if (k === 'f' || k === 'F') { ev.preventDefault(); kSetFollow(!K.follow); return; }
+    if (k === 'w' || k === 'W') { ev.preventDefault(); kSetWord(!K.word); return; }
+    if (k === '[' || k === ']') {
+      ev.preventDefault();
+      const R = [1, 1.25, 1.5, 2], c = R.indexOf(audio.playbackRate);
+      audio.playbackRate = R[Math.max(0, Math.min(R.length - 1, (c < 0 ? 0 : c) + (k === '[' ? -1 : 1)))];
+      document.querySelectorAll('[data-ch="arate"]').forEach(x => { x.value = String(audio.playbackRate); });
+      return;
+    }
   }
   if (!inEd || typing || S.modal || ev.metaKey || ev.ctrlKey || ev.altKey) return;
   const e = S.ed;

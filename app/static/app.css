@@ -440,3 +440,61 @@ details.conf summary{cursor:pointer;color:var(--fg-2);display:flex;gap:6px;align
 .filecard .frow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:12px}
 .filecard .frow .muted{font-size:11.5px;flex-basis:100%}
 .filecard .fmsg,.filecard .fnote{margin:2px 0 0;display:flex;gap:5px;align-items:center}
+
+/* ---------------- Interactive Transcript in the Audio tab (v1.6) ----------------
+   NOTE: Rifqi is colour-blind. The active line has a bar, ▶ and a bold time; the active word has an
+   underline, and in the active line the words not heard yet are dimmed (light/dark, not hue). */
+:root{ --kcap:rgba(11,115,124,.16); }
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ --kcap:rgba(67,191,200,.17); } }
+:root[data-theme="dark"]{ --kcap:rgba(67,191,200,.17); }
+.kmain{max-width:960px}
+.tsync{display:flex;flex-direction:column;gap:10px;flex:1 0 auto;min-height:340px;padding:12px 12px 10px}
+.khead{display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap;margin-bottom:8px}
+.khead h3{margin:0;font-size:13px}
+.khead span{font-size:12px;color:var(--fg-3)}
+.ktool{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;font-size:12.5px;color:var(--fg-2)}
+.ktool .grow{flex:1}
+.kver{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 9px;border:1px solid var(--line);border-radius:6px;background:var(--btn);color:var(--fg);font-weight:500}
+.knote{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--fg-2)}
+.knote.est{height:22px;padding:0 8px;border:1px dashed var(--line);border-radius:6px}
+.knote.warn .ic{color:var(--warn)}
+.kopt{display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.kopt kbd,.khint kbd{font:600 10.5px var(--mono);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;background:var(--btn);color:var(--fg-2)}
+.kwrap{position:relative;flex:1 1 0;min-height:240px;display:flex}
+.klist{position:relative;flex:1;overflow-y:auto;border:1px solid var(--line);border-radius:10px;background:var(--win);padding:6px 0;overscroll-behavior:contain}
+.kseg{display:grid;grid-template-columns:84px 132px minmax(0,1fr);gap:2px 10px;padding:6px 14px 6px 9px;border-left:3px solid transparent;cursor:pointer;content-visibility:auto;contain-intrinsic-size:auto 40px}
+.kseg.noparts{grid-template-columns:84px minmax(0,1fr)}
+.kseg:hover{background:var(--fill-2)}
+.kseg.on{background:var(--sel);border-left-color:var(--accent)}
+.kseg .ts{align-self:start;text-align:left;cursor:pointer;white-space:nowrap}
+.kseg.on .ts{font-weight:700;color:var(--fg)}
+.kseg.on .ts::before{content:"▶ ";font-size:8.5px;vertical-align:1px}
+.kseg .who{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--fg);min-width:0;align-self:start;padding-top:1px}
+.kseg.cont .who{visibility:hidden}
+.kseg .av{width:18px;height:18px;border-radius:4px;background:var(--fill);border:1px solid var(--line);display:grid;place-items:center;font-size:10px;font-weight:700;flex:none;color:var(--fg-2);text-transform:uppercase}
+.kseg .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kseg .who.none .nm{font-style:italic;font-weight:400;color:var(--fg-3)}
+.kseg .who.none .av{border-style:dashed;background:transparent}
+.kseg .txt{min-width:0;font-size:13.5px;line-height:1.6;color:var(--fg)}
+.kseg.past .txt{color:var(--fg-2)}
+.kseg .kx{grid-column:-2 / -1;display:flex;gap:6px;flex-wrap:wrap;font-size:11.5px;color:var(--fg-3)}
+.kseg .klock{height:18px}
+.kseg .kcut{display:inline-flex;align-items:center;gap:4px}
+.kseg .kest{font-weight:700}
+.kseg .w{border-radius:5px;padding:.08em .3em;margin:-.08em -.3em;transition:background-color .12s ease,color .12s ease}
+.klist:not(.noword) .kseg.on .w{color:var(--fg-3)}
+.klist:not(.noword) .kseg.on .w.done{color:var(--fg)}
+.klist:not(.noword) .kseg.on .w.on{color:var(--fg);background:var(--kcap);text-decoration:underline 2px var(--accent);text-underline-offset:.28em}
+@media (prefers-reduced-motion: reduce){ .kseg .w{transition:none} }
+.kfollow[hidden]{display:none}
+.kfollow{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);height:30px;font-weight:600;box-shadow:0 4px 14px rgba(0,0,0,.2)}
+.kgap{display:flex;align-items:center;gap:8px;padding:1px 14px 1px 106px;font:11px var(--mono);color:var(--fg-3)}
+.kgap::before,.kgap::after{content:"";border-top:1px dashed var(--line);flex:0 1 110px}
+.khint{display:flex;gap:4px 14px;flex-wrap:wrap;align-items:center;font-size:11.5px;color:var(--fg-3)}
+@media (max-width:700px){
+  .kseg{grid-template-columns:62px minmax(0,1fr)}
+  .kseg .who{grid-column:2}
+  .kseg .txt,.kseg .kx{grid-column:1 / -1}
+  .kseg.cont .who{display:none}
+  .kgap{padding-left:14px}
+}
