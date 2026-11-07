@@ -132,7 +132,7 @@ def postprocess_summary(md: str, meta: dict, version: dict, model: str, send: di
 
 class Jobs:
     def __init__(self, store: store_mod.Store, bus: Bus, *, load_audio=None, transcribe_chunk=None,
-                 save_m4a=None, claude=None, api_key=None, config=None):
+                 save_m4a=None, claude=None, api_key=None, config=None, model_ready=None, download_model=None):
         self.store = store
         self.bus = bus
         self.load_audio = load_audio or core.load_audio
@@ -141,6 +141,8 @@ class Jobs:
         self.claude = claude or core.ai_text
         self.api_key = api_key or core.get_api_key
         self.config = config or core.load_config
+        self.model_ready = model_ready or core.whisper_downloaded
+        self.download_model = download_model or core.download_whisper
         self.q: queue.Queue = queue.Queue()
         self.current: dict | None = None
         self.pending: list[dict] = []
@@ -227,9 +229,11 @@ class Jobs:
         m = st.meta(mid)
         cfg = self.config()
         s = m.get("settings") or {}
+        wm = core.whisper_model(s.get("whisper_model") or cfg.get("whisper_model"))
+        repo = wm["repo"]
         parts_dir = folder / PARTS
         fp = json.dumps({"lang": s.get("language"), "rs": s.get("remove_silence", True),
-                         "vocab": s.get("vocabulary", ""), "repo": cfg.get("whisper_repo"),
+                         "vocab": s.get("vocabulary", ""), "repo": repo,
                          "ms": cfg.get("min_silence_sec"), "track": s.get("audio_track")}, sort_keys=True)
         if parts_dir.exists() and (parts_dir / "settings.json").exists() and \
                 (parts_dir / "settings.json").read_text() != fp:
@@ -271,6 +275,14 @@ class Jobs:
                     self._log(mid, "Audio bersih disimpan")
                 except Exception as exc:  # noqa: BLE001 - optional output
                     self._log(mid, f"Audio bersih gagal disimpan ({type(exc).__name__})")
+            if self.model_ready(repo) is False:
+                # first use of this model: download it before the first chunk so the
+                # progress screen says why nothing moves for a while
+                self._progress(mid, phase="download", pct=0, chunk=0, chunks=0, eta=None)
+                self._log(mid, f"Mengunduh model {wm['name']} (±{wm['size_gb']:.1f} GB, sekali saja)".replace(".", ",", 1))
+                self.download_model(repo)
+                self._log(mid, f"Model {wm['name']} siap")
+            self._log(mid, f"Model transkripsi: {wm['label']} ({wm['name']})")
             chunks = core.chunk_bounds(clean)
             n = len(chunks)
             names = [p["name"] for p in m.get("participants") or []]
@@ -293,7 +305,6 @@ class Jobs:
                                chunks=n, eta=eta)
                 self._log(mid, f"Mentranskrip bagian {chunk_i + 1} dari {n}")
                 t0 = time.time()
-                repo = cfg.get("whisper_repo", core.WHISPER_REPO)
                 wc = cfg.get("word_confidence", True)
                 with self.whisper_lock:
                     segs = self.transcribe_chunk(clean.audio[a:b], lang, prompt, repo, wc)
@@ -316,6 +327,7 @@ class Jobs:
             segments = core.dedupe(segments)
             self._progress(mid, phase="finish", pct=100, chunk=n, chunks=n, eta=0)
             st.save_whisper(mid, segments, {"progress": None, "error": None,
+                                            "whisper_model": {"key": wm["key"], "name": wm["name"], "repo": repo},
                                             "duration_sec": round(dur, 1), "clean_sec": round(clean.clean_sec, 1)})
             shutil.rmtree(parts_dir, ignore_errors=True)
             self._log(mid, f"Transkripsi selesai: {len(segments)} segmen. Siap ditinjau.")

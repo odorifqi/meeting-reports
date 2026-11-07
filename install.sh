@@ -50,7 +50,7 @@ if [[ ! -x "$SUPPORT/venv/bin/python" ]]; then
 fi
 uv pip install --python "$SUPPORT/venv/bin/python" -r "$SUPPORT/app/requirements.txt"
 
-say "Cek model Whisper large-v3-turbo (~1,6 GB, diunduh sekali saja)"
+say "Cek model Whisper large-v3-turbo (~1,6 GB, diunduh sekali saja; model Akurat large-v3 ~3,1 GB diunduh saat pertama dipilih)"
 "$SUPPORT/venv/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('mlx-community/whisper-large-v3-turbo')"
 
 say "Buat $APP"
@@ -69,8 +69,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Meeting Report</string>
   <key>CFBundleDisplayName</key><string>Meeting Report</string>
   <key>CFBundleIdentifier</key><string>app.meetingreport.desktop</string>
-  <key>CFBundleVersion</key><string>2.1.0</string>
-  <key>CFBundleShortVersionString</key><string>2.1.0</string>
+  <key>CFBundleVersion</key><string>2.1.1</string>
+  <key>CFBundleShortVersionString</key><string>2.1.1</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>MeetingNotes</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>

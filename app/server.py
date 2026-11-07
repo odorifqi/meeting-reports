@@ -27,7 +27,7 @@ import jobs as jobs_mod
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
@@ -35,8 +35,18 @@ AUDIO_EXT = {".m4a", ".mp3", ".wav", ".aac", ".mp4", ".mov", ".caf", ".aiff", ".
              ".webm", ".m4v", ".qta", ".mkv", ".avi", ".opus"}
 EDITABLE_SETTINGS = {"claude_model", "remove_silence", "min_silence_sec", "save_clean_audio", "language",
                      "vocabulary", "theme", "redact", "sensitive_words", "word_confidence",
-                     "ai_provider", "ai_models", "ai_base_url", "gap_fill_sec"}
+                     "ai_provider", "ai_models", "ai_base_url", "gap_fill_sec", "whisper_model"}
 MODELS = core.PROVIDERS["anthropic"]["models"]
+
+
+def whisper_models(check_cache: bool = False) -> list[dict]:
+    out = []
+    for k in core.WHISPER_MODELS:
+        info = core.whisper_model(k)
+        if check_cache:
+            info["downloaded"] = core.whisper_downloaded(info["repo"])
+        out.append(info)
+    return out
 
 
 def _model_ok(v) -> bool:
@@ -170,7 +180,8 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         return {"version": APP_VERSION, "busy": jb.busy(), "jobs": jb.state(),
                 "api_key": core.has_api_key(ai["provider"]), "theme": cfg.get("theme", "system"),
                 "output_root": str(st.root), "models": core.PROVIDERS[ai["provider"]]["models"],
-                "model": ai["model"], "ai": {k: v for k, v in ai.items() if k != "providers"}}
+                "model": ai["model"], "ai": {k: v for k, v in ai.items() if k != "providers"},
+                "whisper_models": whisper_models(), "whisper_model": core.whisper_model(cfg.get("whisper_model"))["key"]}
 
     @app.get("/api/events")
     async def events(request: Request):
@@ -269,6 +280,7 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             "remove_silence": bool(body.get("remove_silence", cfg.get("remove_silence", True))),
             "save_clean_audio": bool(body.get("save_clean_audio", cfg.get("save_clean_audio", True))),
             "vocabulary": str(body.get("vocabulary", cfg.get("vocabulary", ""))),
+            "whisper_model": core.whisper_model(body.get("whisper_model") or cfg.get("whisper_model"))["key"],
         }
         parts = []
         for i, p in enumerate(body.get("participants") or []):
@@ -480,8 +492,10 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             lo = max(0.0, a - 1.0)
             audio = jobs_mod.load_track(jb.load_audio, str(src), (m.get("settings") or {}).get("audio_track"),
                                         start=lo, dur=(b - a) + 2.0)
+            # same model that made this transcript (older meetings: the fast model they used)
+            used = (m.get("whisper_model") or {}).get("key") or (m.get("settings") or {}).get("whisper_model")
             segs = jb.transcribe_chunk(audio, (m.get("settings") or {}).get("language") or None, None,
-                                       cfg.get("whisper_repo", core.WHISPER_REPO), cfg.get("word_confidence", True))
+                                       core.whisper_model(used)["repo"], cfg.get("word_confidence", True))
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(500, f"Transkrip ulang gagal ({type(exc).__name__})")
         finally:
@@ -662,7 +676,8 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         ai = ai_info(cfg)
         return {"config": {k: cfg.get(k) for k in EDITABLE_SETTINGS}, "api_key": core.has_api_key(ai["provider"]),
                 "models": core.PROVIDERS[ai["provider"]]["models"], "ai": ai,
-                "output_root": str(st.root), "categories": filters.CATEGORIES}
+                "output_root": str(st.root), "categories": filters.CATEGORIES,
+                "whisper_models": whisper_models(check_cache=True)}
 
     @app.put("/api/settings")
     def put_settings(body: dict = Body(...)):
@@ -691,6 +706,10 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
                     if p in core.PROVIDERS and _url_ok(uv):
                         cur[p] = uv.strip().rstrip("/")
                 cfg[k] = cur
+                continue
+            if k == "whisper_model":
+                if v in core.WHISPER_MODELS:
+                    cfg[k] = v
                 continue
             if k == "gap_fill_sec":
                 try:

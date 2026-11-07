@@ -24,6 +24,11 @@ FRAME = 0.03          # energy analysis window, seconds
 CHUNK_SEC = 600       # transcribe in ~10 minute chunks so the UI can show progress
 
 WHISPER_REPO = "mlx-community/whisper-large-v3-turbo"
+# transcription models the user picks from: fast (default) or accurate (3-6x slower)
+WHISPER_MODELS = {
+    "cepat": {"repo": WHISPER_REPO, "label": "Cepat", "name": "large-v3-turbo", "size_gb": 1.6},
+    "akurat": {"repo": "mlx-community/whisper-large-v3-mlx", "label": "Akurat", "name": "large-v3", "size_gb": 3.1},
+}
 CLAUDE_MODEL = "claude-sonnet-5-5"
 KEYCHAIN_SERVICE = "MeetingNotes"
 KEYCHAIN_ACCOUNT = "anthropic-api-key"
@@ -41,7 +46,7 @@ VOICE_MEMOS_DIR = (Path.home() / "Library" / "Group Containers"
 
 DEFAULT_CONFIG = {
     "claude_model": CLAUDE_MODEL,
-    "whisper_repo": WHISPER_REPO,
+    "whisper_model": "cepat",
     "remove_silence": True,
     "min_silence_sec": 2.0,
     "save_clean_audio": True,
@@ -334,6 +339,26 @@ class Cancelled(Exception):
     """Raised when the user cancels a running transcription."""
 
 
+def whisper_model(key: str | None) -> dict:
+    """Model info for a key; unknown keys fall back to the fast model."""
+    k = key if key in WHISPER_MODELS else "cepat"
+    return {"key": k, **WHISPER_MODELS[k]}
+
+
+def whisper_downloaded(repo: str) -> bool | None:
+    """True if the model is already in the Hugging Face cache (None if that cannot be checked)."""
+    try:
+        from huggingface_hub import scan_cache_dir
+        return any(r.repo_id == repo and r.size_on_disk > 100_000_000 for r in scan_cache_dir().repos)
+    except Exception:  # noqa: BLE001 - no cache yet, or library missing
+        return None
+
+
+def download_whisper(repo: str) -> None:
+    from huggingface_hub import snapshot_download
+    snapshot_download(repo)
+
+
 def whisper_prompt(vocabulary: str = "", participants: list[str] | None = None) -> str | None:
     parts = []
     if vocabulary.strip():
@@ -532,6 +557,9 @@ def format_transcript(segments: list[dict], title: str, clean: CleanResult | Non
     if rec.strip():
         L.append(f"Rekaman      : {rec.strip()}")
     L.append(f"Bahasa       : {LANG_NAMES.get(meta.get('language') or '', 'Otomatis')}")
+    wm = meta.get("whisper_model") or {}
+    if wm.get("name"):
+        L.append(f"Model        : Whisper {wm['name']} ({WHISPER_MODELS.get(wm.get('key'), {}).get('label', '')}, lokal)".replace(" (, lokal)", " (lokal)"))
     if meta.get("rev"):
         saved = meta.get("saved_at")
         L.append(f"Versi        : {meta['rev']}" + (

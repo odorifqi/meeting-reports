@@ -265,7 +265,7 @@ function patchProgress() {
   const el = $('#pg-pct'); if (el) el.textContent = `${p.pct || 0}%`;
   const bar = $('#pg-bar'); if (bar) bar.style.width = `${p.pct || 0}%`;
   const part = $('#pg-part'); if (part) part.textContent = progTitle(p);
-  const eta = $('#pg-eta'); if (eta) eta.textContent = etaText(p);
+  const eta = $('#pg-eta'); if (eta) eta.textContent = etaText(p, S.m);
   const sj = $('#sj-bar'); if (sj) sj.style.width = `${p.pct || 0}%`;
 }
 function patchLog() { const el = $('#pg-log'); if (el) { el.innerHTML = logHTML(S.m.log); el.scrollTop = el.scrollHeight; } }
@@ -331,12 +331,22 @@ function S1() {
 }
 
 /* ------------------------------------------------------------------ S2 Rapat baru */
+/* Whisper model choice: fast (turbo) or accurate (large-v3) */
+const WM_NOTE = { cepat: 'Pilihan harian, sekitar 3–6× lebih cepat', akurat: 'Sedikit lebih akurat, 3–6× lebih lambat' };
+const wmList = () => (S.settings && S.settings.whisper_models) || (S.state && S.state.whisper_models) || [];
+const wmOpt = (sel) => wmList().map(w => `<option value="${w.key}"${w.key === sel ? ' selected' : ''}>${w.label} · ${w.name}</option>`).join('');
+function wmSmall(key) {
+  const w = wmList().find(x => x.key === key);
+  if (!w) return '';
+  const dl = w.downloaded === false ? ` · diunduh sekali saat pertama dipakai (±${String(w.size_gb).replace('.', ',')} GB)` : '';
+  return WM_NOTE[key] + dl;
+}
 async function initNew(file) {
   const s = await api('/api/settings');
   S.settings = s;
   const c = s.config;
   S.s2 = { file: null, title: '', lang: c.language || 'id', trim: c.remove_silence !== false,
-    clean: c.save_clean_audio !== false, terms: c.vocabulary || '', parts: [], uploading: null, cleanNote: false, titleTouched: false };
+    clean: c.save_clean_audio !== false, terms: c.vocabulary || '', model: c.whisper_model || 'cepat', parts: [], uploading: null, cleanNote: false, titleTouched: false };
   if (file) s2File(file);
   try { S.recent = (await api('/api/participants/recent')).meetings; } catch (e) { S.recent = []; }
 }
@@ -376,6 +386,7 @@ function S2() {
   <div><div class="fgl">Rekaman</div>${fileHTML}</div>
   <div><div class="fgl"><label for="s2-title">Judul rapat</label></div><div class="group" style="padding:8px 12px"><input class="field" id="s2-title" maxlength="${TITLE_MAX}" style="width:100%;border:0;box-shadow:none;background:transparent;padding:0" placeholder="Misalnya: Rapat Koordinasi Kredit Mikro Q4" value="${esc(s.title)}" data-in="s2title" aria-describedby="s2-title-msg"></div><div class="fmsg" id="s2-title-msg" role="status"${s.titleTouched && titleMsg(s.title) ? '' : ' hidden'}>${s.titleTouched && titleMsg(s.title) ? ic('warn', 'sm') + esc(titleMsg(s.title)) : ''}</div><div class="fnote">Dipakai juga sebagai nama folder: <span class="mono">tanggal rekaman - judul</span>. Karakter / : \\ tidak bisa dipakai.</div></div>
   <div><div class="fgl">Pengaturan proses</div><div class="group">
+   <div class="row"><div class="lb">Model transkripsi<small id="s2-model-note">${wmSmall(s.model)}</small></div><div class="rv"><select class="pop" id="s2-model" data-ch="s2model" aria-label="Model transkripsi">${wmOpt(s.model)}</select></div></div>
    <div class="row"><div class="lb">Bahasa transkrip<small>Dipakai Whisper saat transkripsi</small></div><div class="rv"><select class="pop" id="s2-lang" data-ch="s2lang" aria-label="Bahasa">${Object.entries(LANG).map(([k, v]) => `<option value="${k}"${s.lang === k ? ' selected' : ''}>${v}</option>`).join('')}</select></div></div>
    <div class="row"><div class="lb">Buang hening<small>${s.cleanNote ? 'File ini sudah audio bersih, jadi hening tidak dipotong lagi' : `Jeda lebih dari ${String((S.settings.config.min_silence_sec || 2)).replace('.', ',')} detik dipotong`}</small></div><div class="rv">${sw('s2trim', s.trim, 'Buang hening')}</div></div>
    <div class="row"><div class="lb">Simpan audio bersih<small>Audio bersih.m4a tanpa jeda panjang</small></div><div class="rv">${sw('s2clean', s.clean && s.trim, 'Simpan audio bersih')}</div></div>
@@ -409,16 +420,23 @@ async function uploadFile(file) {
 }
 
 /* ------------------------------------------------------------------ S3 progres / S3b gagal */
+function usedWm(m) {
+  const k = (m && ((m.whisper_model && m.whisper_model.key) || (m.settings && m.settings.whisper_model))) || 'cepat';
+  return wmList().find(x => x.key === k) || { key: k, label: k === 'akurat' ? 'Akurat' : 'Cepat', name: k === 'akurat' ? 'large-v3' : 'large-v3-turbo' };
+}
 function progTitle(p) {
+  if (p && p.phase === 'download') return 'Mengunduh model transkripsi';
   if (!p || p.phase === 'decode') return 'Membaca dan membersihkan audio';
   if (p.phase === 'finish') return 'Menyusun transkrip';
   return `Transkripsi bagian ${p.chunk} dari ${p.chunks}`;
 }
-function etaText(p) {
-  const base = 'mlx-whisper large-v3-turbo, lokal';
+function etaText(p, m) {
+  const w = usedWm(m);
+  const base = `Whisper ${w.name} (${w.label.toLowerCase()}), lokal`;
+  if (p && p.phase === 'download') return `Mengunduh model ${w.name}, sekali saja · ${base}`;
   if (!p || p.eta == null) return `Perkiraan sisa dihitung setelah bagian pertama · ${base}`;
-  const m = Math.max(1, Math.round(p.eta / 60));
-  return `Perkiraan sisa ±${m} menit · ${base}`;
+  const mins = Math.max(1, Math.round(p.eta / 60));
+  return `Perkiraan sisa ±${mins} menit · ${base}`;
 }
 function logHTML(log) { return (log || []).slice(-80).map(l => `<b>${esc(l.t)}</b> ${esc(l.text)}`).join('\n'); }
 function S3() {
@@ -431,10 +449,11 @@ function S3() {
   const phase = p.phase || 'decode';
   return tb(ttl(esc(m.title), sub), `<button class="btn" data-act="cancelJob">Batalkan</button>`, '#/riwayat') +
   `<div class="pane"><div class="s3"><div style="display:grid;gap:14px"><div class="card">${queued ? `<div class="big"><h2>Menunggu giliran</h2></div><div class="muted" style="font-size:12px">Satu rekaman diproses dalam satu waktu. Rapat ini mulai setelah proses sebelumnya selesai.</div>` :
-  `<div class="big"><h2 id="pg-part">${progTitle(p)}</h2><span class="pct" id="pg-pct">${p.pct || 0}%</span></div><div class="bar"><i id="pg-bar" style="width:${p.pct || 0}%"></i></div><div class="muted" style="font-size:12px;margin-top:8px" id="pg-eta">${etaText(p)}</div>`}
+  `<div class="big"><h2 id="pg-part">${progTitle(p)}</h2><span class="pct" id="pg-pct">${p.pct || 0}%</span></div><div class="bar"><i id="pg-bar" style="width:${p.pct || 0}%"></i></div><div class="muted" style="font-size:12px;margin-top:8px" id="pg-eta">${etaText(p, m)}</div>`}
   <ul class="steps">${st(m.duration_sec != null, !queued && phase === 'decode' && m.duration_sec == null, 'Dekode audio', m.duration_sec ? fmtDur(m.duration_sec) : '')}
   ${st(cleaned, false, 'Buang hening', cleaned ? `${fmtDur(m.duration_sec - m.clean_sec)} dibuang` : '')}
-  ${st(phase === 'finish', !queued && phase === 'transcribe', 'Transkripsi lokal')}
+  ${phase === 'download' ? st(false, true, `Unduh model ${usedWm(m).name}`, 'sekali saja') : ''}
+  ${st(phase === 'finish', !queued && phase === 'transcribe', 'Transkripsi lokal', usedWm(m).label)}
   ${st(false, false, 'Tinjau dan perbaiki transkrip')}${st(false, false, 'Ringkasan (opsional, butuh konfirmasi)')}</ul></div>
   <div class="banner info">${ic('info')}<span class="grow">Jendela boleh ditutup. Proses tetap jalan dan rapat ini bisa dibuka lagi dari Riwayat.</span></div></div>
   <div><div class="fgl">Log</div><div class="log" id="pg-log">${logHTML(m.log)}</div></div></div></div>`;
@@ -1012,7 +1031,7 @@ function dhead(tab) {
   const tabs = [['transkrip', 'Transkrip'], ['ringkasan', 'Ringkasan'], ['audio', 'Audio']];
   const docx = (m.files || []).includes('Ringkasan.docx');
   return `<div class="dh"><div class="dh-top"><div style="min-width:0">${S.editTitle ? `<div class="ttl-edit"><input class="field" id="ttl-in" maxlength="${TITLE_MAX}" style="font-size:17px;height:32px;width:420px" value="${esc(m.title)}" data-enter="ttlOk" data-in="ttlin" aria-label="Judul rapat" aria-describedby="ttl-msg"><button class="btn pri" data-act="ttlSave">Simpan</button><button class="btn ghost" data-act="ttlCancel">Batal</button></div><div class="fmsg" id="ttl-msg" role="status" hidden></div><div class="fnote">Nama folder ikut diganti. Karakter / : \\ tidak bisa dipakai.</div>` : `<h1>${esc(m.title)}<button class="iconb" data-act="editTitle" aria-label="Ubah judul">${ic('pencil', 'sm')}</button></h1>`}
-  <div class="meta"><span class="mono">${fmtDate(m.created)}</span>·<span class="mono">${fmtDur(m.duration_sec)}${m.clean_sec && m.settings && m.settings.remove_silence !== false ? ` (bersih ${fmtDur(m.clean_sec)})` : ''}</span>·<span>${LANG[m.language] || 'Otomatis'}</span>·<span>${num(m.counts.total)} segmen</span>${m.claude_suggest ? claudePill(m.claude_suggest) : ''}${m.v1 ? v1Pill() : ''}</div></div>
+  <div class="meta"><span class="mono">${fmtDate(m.created)}</span>·<span class="mono">${fmtDur(m.duration_sec)}${m.clean_sec && m.settings && m.settings.remove_silence !== false ? ` (bersih ${fmtDur(m.clean_sec)})` : ''}</span>·<span>${LANG[m.language] || 'Otomatis'}</span>${m.whisper_model ? `·<span title="Model transkripsi">Whisper ${esc(m.whisper_model.name)}</span>` : ''}·<span>${num(m.counts.total)} segmen</span>${m.claude_suggest ? claudePill(m.claude_suggest) : ''}${m.v1 ? v1Pill() : ''}</div></div>
   <div style="display:flex;gap:6px;flex:none"><button class="btn" data-go="${mhash(m.id, 'edit')}"${m.job ? ' disabled' : ''}>${ic('pencil')}Edit transkrip</button><button class="btn ghost" data-act="finder">${ic('folder')}Buka di Finder</button>${docx ? `<button class="btn ghost" data-act="finder" data-file="Ringkasan.docx">${ic('dl')}Tampilkan .docx</button>` : ''}<button class="btn ghost dng" data-act="openM4">${ic('trash')}Hapus</button></div></div>
   <div class="tabs" role="tablist">${tabs.map(t => `<button class="tab" role="tab" data-go="${mhash(m.id, t[0])}" aria-selected="${tab === t[0]}">${t[1]}${t[0] === 'ringkasan' && m.stale ? `${ic('warn', 'sm')}<span class="sr">usang</span>` : ''}</button>`).join('')}</div></div>`;
 }
@@ -1272,6 +1291,7 @@ function S7() {
   <details class="conf"><summary>${ic('lock', 'sm')}Ke mana teks dikirim? Kerahasiaan per penyedia</summary><table class="ctab"><thead><tr><th>Penyedia</th><th>Keluar dari Mac?</th><th>Catatan</th></tr></thead><tbody>${CONF.map(r => `<tr${r[0] === pv.id ? ' class="on"' : ''}><td>${esc(pname(r[0]))}${r[0] === pv.id ? ' <span class="pill p-info mini">dipakai</span>' : ''}</td><td>${r[1] === 'Tidak' ? ic('lock', 'sm') : ic('send', 'sm')}${r[1]}</td><td>${r[2]}</td></tr>`).join('')}</tbody></table><p class="muted" style="font-size:11.5px;margin:6px 2px 0">Ketentuan umum per penyedia. Cek ulang ke ketentuan terbaru dan kebijakan TI/kepatuhan kantor Anda sebelum memakai penyedia baru untuk rapat sungguhan.</p></details></div>
   <div><div class="fgl">Tampilan</div><div class="group"><div class="row"><div class="lb">Tema<small>Sistem mengikuti pengaturan macOS</small></div><div class="rv"><div class="segc" role="group" aria-label="Tema aplikasi">${[['system', 'Sistem'], ['light', 'Terang'], ['dark', 'Gelap']].map(t => `<button data-act="theme" data-v="${t[0]}" aria-pressed="${theme === t[0]}">${t[1]}</button>`).join('')}</div></div></div></div></div>
   <div><div class="fgl">Default rapat baru</div><div class="group"><div class="row"><div class="lb">Bahasa</div><div class="rv"><select class="pop" data-ch="cfg" data-k="language" aria-label="Bahasa default">${Object.entries(LANG).map(([k, v]) => `<option value="${k}"${c.language === k ? ' selected' : ''}>${v}</option>`).join('')}</select></div></div>
+   <div class="row"><div class="lb">Model transkripsi<small>${wmSmall(c.whisper_model || 'cepat')}</small></div><div class="rv"><select class="pop" data-ch="cfg" data-k="whisper_model" aria-label="Model transkripsi default">${wmOpt(c.whisper_model || 'cepat')}</select></div></div>
    <div class="row"><div class="lb">Buang hening lebih dari</div><div class="rv"><input class="field mono" id="s7-sil" value="${String(c.min_silence_sec).replace('.', ',')}" style="width:56px;text-align:right" data-ch="cfgnum" data-k="min_silence_sec" aria-label="Detik"> detik</div></div>
    <div class="row"><div class="lb">Penanda kata ragu<small>Whisper menandai kata yang kurang yakin (sedikit lebih lambat)</small></div><div class="rv">${sw('wordconf', c.word_confidence, 'Penanda kata ragu')}</div></div>
    <div class="row"><div class="lb">Istilah penting<small>Pisahkan dengan koma</small></div><div class="rv" style="flex:1"><input class="field" id="s7-terms" style="width:100%" value="${esc(c.vocabulary)}" data-ch="cfg" data-k="vocabulary" aria-label="Istilah penting"></div></div></div></div>
@@ -1399,7 +1419,7 @@ const A = {
     el.disabled = true;
     try {
       const r = await post('/api/meetings', { source_path: s.file.path, title: s.title, language: s.lang, remove_silence: s.trim,
-        save_clean_audio: s.clean && s.trim, vocabulary: s.terms, participants: s.parts, audio_track: s.track });
+        save_clean_audio: s.clean && s.trim, vocabulary: s.terms, participants: s.parts, audio_track: s.track, whisper_model: s.model });
       S.s2 = null;
       await loadState();
       go(mhash(r.id, 'progres'));
@@ -1765,6 +1785,7 @@ document.addEventListener('change', async ev => {
   try {
     if (k === 'fstat') { S.fstat = t.value; await loadList(); render(); }
     else if (k === 's2lang') S.s2.lang = t.value;
+    else if (k === 's2model') { S.s2.model = t.value; const n = document.getElementById('s2-model-note'); if (n) n.textContent = wmSmall(t.value); }
     else if (k === 's2track') S.s2.track = t.value === 'mix' ? 'mix' : +t.value;
     else if (k === 's2from') { const r = S.recent.find(x => x.id === t.value); if (r) { S.s2.parts = r.participants.map(p => ({ name: p.name, role: p.role || '' })); render(); } }
     else if (k === 'spk') { const e = S.ed; const i = +t.dataset.i; if (e.sel !== i) selSeg(i); tagSel(t.value || null); }

@@ -61,7 +61,7 @@ def env(tmp_path, monkeypatch):
     bus = jobs_mod.Bus()
     jb = jobs_mod.Jobs(st, bus, load_audio=fake_audio, transcribe_chunk=fake_chunk,
                        save_m4a=lambda a, p: Path(p).write_bytes(b"m4a"), claude=fake_claude,
-                       api_key=lambda p=None: "sk-ant-x")
+                       api_key=lambda p=None: "sk-ant-x", model_ready=lambda r: True)
     app = server.create_app(st, jb, TOKEN)
     c = TestClient(app, base_url="http://127.0.0.1:8765")
     c.headers.update({"x-mn-token": TOKEN})
@@ -399,6 +399,36 @@ def test_video_without_sound_is_refused(env, tmp_path, monkeypatch):
                                                   "unknown": False, "problem": "Video ini tidak punya suara."})
     r = c.post("/api/meetings", json={"source_path": str(src), "title": "Bisu"})
     assert r.status_code == 400 and "suara" in r.json()["detail"]
+
+
+
+def test_whisper_model_choice(env):
+    c, st, jb, src = env
+    seen, downloads = [], []
+    orig = jb.transcribe_chunk
+    jb.transcribe_chunk = lambda a, lang, prompt, repo, wc=True: (seen.append(repo), orig(a, lang, prompt, repo, wc))[1]
+    jb.model_ready = lambda repo: False
+    jb.download_model = lambda repo: downloads.append(repo)
+    s = c.get("/api/settings").json()
+    assert [w["key"] for w in s["whisper_models"]] == ["cepat", "akurat"]
+    assert s["config"]["whisper_model"] == "cepat"
+    c.put("/api/settings", json={"whisper_model": "salah"})
+    assert c.get("/api/settings").json()["config"]["whisper_model"] == "cepat"
+    r = c.post("/api/meetings", json={"source_path": str(src), "title": "Uji akurat", "whisper_model": "akurat"})
+    assert r.status_code == 200, r.text
+    mid = r.json()["id"]
+    wait(jb)
+    m = st.meta(mid)
+    assert m["settings"]["whisper_model"] == "akurat"
+    assert m["whisper_model"] == {"key": "akurat", "name": "large-v3", "repo": "mlx-community/whisper-large-v3-mlx"}
+    assert seen and set(seen) == {"mlx-community/whisper-large-v3-mlx"}
+    assert downloads == ["mlx-community/whisper-large-v3-mlx"]
+    assert "Model        : Whisper large-v3 (Akurat, lokal)" in (st.path(mid) / "Transkrip asli.txt").read_text()
+    # default from settings when the form does not say
+    c.put("/api/settings", json={"whisper_model": "akurat"})
+    r = c.post("/api/meetings", json={"source_path": str(src), "title": "Uji default"})
+    wait(jb)
+    assert st.meta(r.json()["id"])["whisper_model"]["key"] == "akurat"
 
 
 def test_migrate_output_root(tmp_path):

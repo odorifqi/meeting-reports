@@ -108,7 +108,7 @@ Rapat membahas realisasi KUR dan kenaikan NPL wilayah timur. Dana ke ‹REKENING
 
 st = store_mod.Store(root / "out")
 bus = jobs_mod.Bus()
-jb = jobs_mod.Jobs(st, bus, load_audio=fake_audio, transcribe_chunk=fake_chunk,
+jb = jobs_mod.Jobs(st, bus, load_audio=fake_audio, transcribe_chunk=fake_chunk, model_ready=lambda r: True,
                    save_m4a=lambda a, p: Path(p).write_bytes(b""), claude=fake_claude,
                    api_key=lambda p=None: "sk-ant-demo")
 # small chunks so progress has several parts

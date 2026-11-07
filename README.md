@@ -4,7 +4,7 @@ Aplikasi Mac untuk rekaman rapat: transkrip lokal, editor transkrip, penanda pes
 
 ## Yang tetap di Mac ini
 
-- Audio dan transkripsi Whisper (mlx-whisper large-v3-turbo) 100% lokal.
+- Audio dan transkripsi Whisper 100% lokal. Pilih model **Cepat** (large-v3-turbo, bawaan) atau **Akurat** (large-v3, sedikit lebih akurat tetapi 3–6× lebih lambat, ±3,1 GB diunduh sekali saat pertama dipakai). Model yang dipakai dicatat di `meeting.json` dan baris `Model` di `Transkrip.txt`.
 - Server hanya mendengar di `127.0.0.1`, memakai token sesi dan cek Origin. Tidak bisa dibuka dari jaringan.
 - Teks baru dikirim ke penyedia AI pilihan Anda (Anthropic, OpenAI, Gemini, server kompatibel OpenAI, atau Ollama lokal) setelah Anda konfirmasi (ringkasan atau saran AI), dan selalu lewat filter lokal dulu: nomor rekening, NIK, nomor HP, nomor kartu, NPWP, email, dan kata sensitif Anda diganti token seperti `‹REKENING_1›`, segmen bertanda Rahasia tidak dikirim, lalu token dipulihkan di Mac ini.
 - API key (satu per penyedia) ada di Keychain macOS dan tidak pernah dikirim ke tampilan.
@@ -39,7 +39,7 @@ MN_OUTPUT_DIR=~/Desktop/mn-uji ./run.sh dev
 
 ## Alur
 
-1. **Rapat Baru**: pilih atau tarik rekaman suara atau video rekaman layar (mp4, mov, webm; boleh di atas 1 GB), isi judul, bahasa, buang hening, istilah penting, dan (opsional) daftar peserta. Urutan peserta = tombol 1 sampai 9 di editor (seret untuk mengurutkan; tombol P untuk mencari nama, berguna bila peserta lebih dari 9). Video dicek dulu (ada suara, codec, file rusak, ruang disk); bila ada lebih dari satu jalur suara, pilih salah satu atau gabung semua.
+1. **Rapat Baru**: pilih atau tarik rekaman suara atau video rekaman layar (mp4, mov, webm; boleh di atas 1 GB), isi judul, model transkripsi (Cepat/Akurat), bahasa, buang hening, istilah penting, dan (opsional) daftar peserta. Urutan peserta = tombol 1 sampai 9 di editor (seret untuk mengurutkan; tombol P untuk mencari nama, berguna bila peserta lebih dari 9). Video dicek dulu (ada suara, codec, file rusak, ruang disk); bila ada lebih dari satu jalur suara, pilih salah satu atau gabung semua.
 2. **Progres**: transkripsi per bagian ±10 menit, persen, perkiraan sisa waktu, log. Bagian suara yang terlewat Whisper (lebih dari 3 detik tanpa teks) otomatis ditranskrip ulang. Jendela boleh ditutup. Kalau gagal, coba lagi melanjutkan dari bagian yang gagal.
 3. **Tinjau transkrip**: edit teks, cari dan ganti, gabung dan pecah segmen, tandai rahasia, putar potongan suara per segmen (Spasi), tandai pembicara (1 sampai 9, 0 hapus), terima atau tolak saran lokal, transkrip ulang celah yang masih kosong. Draf tersimpan otomatis.
 4. **Simpan**: membuat versi 1. Lalu pilih **Buat Ringkasan**, **Transkrip Saja**, atau **Minta saran AI dulu** (opsional, rapat diberi tanda ✦ Disarankan AI).
