@@ -1,9 +1,9 @@
 #!/bin/bash
-# Meeting Notes v1.2, jalankan dari repo (untuk pengembangan).
+# Meeting Report v1.3, jalankan dari repo (untuk pengembangan).
 #   ./run.sh dev     server dengan auto-reload, dibuka di Chrome (seperti "npm run dev")
 #   ./run.sh app     jendela Mac (pywebview) memakai kode di repo ini
 #   ./run.sh test    jalankan tes
-# Data tetap di ~/Documents/Meeting Notes. Untuk data uji terpisah:
+# Data di ~/Documents/Meeting Report. Untuk data uji terpisah:
 #   MN_OUTPUT_DIR=~/Desktop/mn-uji ./run.sh dev
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -23,7 +23,7 @@ ensure_venv() {
 
 if_running_stop() {
   if curl -fs "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
-    echo "Server Meeting Notes (versi terpasang) sedang jalan di port $PORT. Menghentikannya dulu..."
+    echo "Server Meeting Report (versi terpasang) sedang jalan di port $PORT. Menghentikannya dulu..."
     pkill -f "MeetingNotes/app/server.py" || true
     sleep 1
   fi
@@ -36,7 +36,7 @@ case "${1:-dev}" in
     TOKEN=$("$VENV/bin/python" -c "import sys; sys.path.insert(0,'app'); import server; print(server.session_token())")
     URL="http://127.0.0.1:$PORT/?t=$TOKEN"
     echo ""
-    echo "Meeting Notes (dev) -> $URL"
+    echo "Meeting Report (dev) -> $URL"
     echo "Tekan Ctrl+C untuk berhenti."
     (sleep 2; open -a "Google Chrome" "$URL" 2>/dev/null || open "$URL") &
     exec "$VENV/bin/uvicorn" server:app --app-dir app --reload --reload-dir app \

@@ -1,7 +1,7 @@
 """F14: word suggestions for the transcript editor.
 
-Local suggestions run on this Mac and are the default. Claude suggestions are
-optional, go through the F15 filter, and are only proposals: the user accepts
+Local suggestions run on this Mac and are the default. AI suggestions (any
+provider from Pengaturan) are optional, go through the F15 filter, and are only proposals: the user accepts
 or rejects each one. Nothing here edits the transcript by itself.
 """
 from __future__ import annotations
@@ -74,7 +74,8 @@ def local_suggestions(segments: list[dict], participants: list[dict], vocabulary
                 seen.add(m.group(0).lower())
                 out.append({"seg_id": s["id"], "from": m.group(0), "to": m.group(1), "kind": "local",
                             "reason": "Kata berulang"})
-        # 3. words Whisper was unsure about: a hint without a replacement
+        # 3. words Whisper was unsure about: no replacement, so the editor shows these
+        #    only as "Tandai kata ragu" highlights, never as a suggestion card
         for w in (low_words or {}).get(s["id"], []):
             wl = w.lower()
             if wl in seen or wl in lower or not re.search(r"(?<!\w)" + re.escape(w) + r"(?!\w)", text):
@@ -113,8 +114,8 @@ def parse_claude(text: str) -> list[dict]:
 
 
 def claude_suggestions(meta: dict, version: dict, cfg: dict, api_key: str, model: str,
-                       vocabulary: str = "", call=core.claude_text) -> tuple[list[dict], dict]:
-    """Ask Claude for word fixes. Returns (suggestions, send info for the send log)."""
+                       vocabulary: str = "", call=core.ai_text) -> tuple[list[dict], dict]:
+    """Ask the AI provider for word fixes. Returns (suggestions, send info for the send log)."""
     send = filters.build_send(meta, version, cfg, with_ids=True)
     user = f"<info_rapat>\n{send['header']}\n</info_rapat>\n\n"
     if vocabulary.strip():

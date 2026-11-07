@@ -100,7 +100,11 @@
     }
     const used = new Set(draft.filter((s, i) => i < start || i >= end).map(s => s.id));
     lefts.forEach(s => { if (used.has(s.id)) s.id = s.id + '-k' + Math.random().toString(36).slice(2, 6); });
-    return draft.slice(0, start).concat(lefts, draft.slice(end));
+    const res = draft.slice(0, start).concat(lefts, draft.slice(end));
+    // where the left rows landed, so the editor can show "Dikembalikan" in place and undo it
+    res.ids = lefts.map(s => s.id);
+    res.start = start;
+    return res;
   }
 
   // Summary markdown -> [{title, lines}] split at "## " headings

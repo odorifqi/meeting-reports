@@ -1,10 +1,11 @@
 #!/bin/bash
-# Installer Meeting Notes v1.2 untuk macOS (Apple Silicon).
+# Installer Meeting Report v1.3 untuk macOS (Apple Silicon).
 # Jalankan dari Terminal di folder repo:  ./install.sh
 # Aman diulang. Versi v1 (Tkinter) disimpan sebagai cadangan di app-v1/.
 set -euo pipefail
 
-APP_NAME="Meeting Notes"
+APP_NAME="Meeting Report"
+OLD_APP="$HOME/Applications/Meeting Notes.app"
 SUPPORT="$HOME/Library/Application Support/MeetingNotes"
 APP="$HOME/Applications/$APP_NAME.app"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -30,7 +31,7 @@ say "Pasang ffmpeg dan uv (kalau belum ada)"
 command -v ffmpeg >/dev/null 2>&1 || brew install ffmpeg
 command -v uv >/dev/null 2>&1 || brew install uv
 
-say "Hentikan server Meeting Notes yang sedang jalan (kalau ada)"
+say "Hentikan server yang sedang jalan (kalau ada)"
 pkill -f "$SUPPORT/app/server.py" 2>/dev/null || true
 
 mkdir -p "$SUPPORT"
@@ -54,6 +55,10 @@ say "Cek model Whisper large-v3-turbo (~1,6 GB, diunduh sekali saja)"
 
 say "Buat $APP"
 rm -rf "$APP"
+if [[ -d "$OLD_APP" ]]; then
+  echo "Aplikasi lama \"Meeting Notes.app\" dipindah ke Trash (diganti \"Meeting Report.app\")."
+  osascript -e "tell application \"Finder\" to delete POSIX file \"$OLD_APP\"" >/dev/null 2>&1 || rm -rf "$OLD_APP"
+fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -61,13 +66,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Meeting Notes</string>
-  <key>CFBundleDisplayName</key><string>Meeting Notes</string>
+  <key>CFBundleName</key><string>Meeting Report</string>
+  <key>CFBundleDisplayName</key><string>Meeting Report</string>
   <key>CFBundleIdentifier</key><string>app.meetingreport.desktop</string>
-  <key>CFBundleVersion</key><string>2.0</string>
-  <key>CFBundleShortVersionString</key><string>2.0</string>
+  <key>CFBundleVersion</key><string>2.1.0</string>
+  <key>CFBundleShortVersionString</key><string>2.1.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>MeetingNotes</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -82,8 +88,13 @@ exec "$SUPPORT/venv/bin/python" "$SUPPORT/app/main.py" "\$@" 2>>"$SUPPORT/logs/e
 LAUNCHER
 chmod +x "$APP/Contents/MacOS/MeetingNotes"
 
+if [[ -d "$SRC_DIR/app/icon/AppIcon.iconset" ]]; then
+  iconutil -c icns "$SRC_DIR/app/icon/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns" || echo "Ikon gagal dibuat (aplikasi tetap jalan)."
+fi
+touch "$APP"
+
 say "Selesai"
 echo "Aplikasi: $APP"
 echo "Buka dari Finder > Applications (folder pribadi), atau jalankan: open \"$APP\""
-echo "Hasil rapat tetap di: ~/Documents/Meeting Notes/ (hasil v1 ikut tampil di Riwayat)"
+echo "Hasil rapat di: ~/Documents/Meeting Report/ (isi ~/Documents/Meeting Notes dipindah ke sana saat aplikasi pertama dibuka)"
 echo "Cadangan v1: $SUPPORT/app-v1 (kalau ada)"

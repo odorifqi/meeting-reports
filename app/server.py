@@ -1,4 +1,4 @@
-"""Meeting Notes v1.1 local server: FastAPI on 127.0.0.1 only.
+"""Meeting Report (v1.3) local server: FastAPI on 127.0.0.1 only.
 
 Security model (PRD): binds to 127.0.0.1, checks the Host header (DNS
 rebinding), requires the session token (cookie set from the launcher URL, or
@@ -27,15 +27,42 @@ import jobs as jobs_mod
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
 AUDIO_EXT = {".m4a", ".mp3", ".wav", ".aac", ".mp4", ".mov", ".caf", ".aiff", ".aif", ".flac", ".ogg",
-             ".webm", ".m4v", ".qta"}
+             ".webm", ".m4v", ".qta", ".mkv", ".avi", ".opus"}
 EDITABLE_SETTINGS = {"claude_model", "remove_silence", "min_silence_sec", "save_clean_audio", "language",
-                     "vocabulary", "theme", "redact", "sensitive_words", "word_confidence"}
-MODELS = ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+                     "vocabulary", "theme", "redact", "sensitive_words", "word_confidence",
+                     "ai_provider", "ai_models", "ai_base_url", "gap_fill_sec"}
+MODELS = core.PROVIDERS["anthropic"]["models"]
+
+
+def _model_ok(v) -> bool:
+    return isinstance(v, str) and 0 < len(v.strip()) <= 120 and not any(c in v for c in "\n\r\t")
+
+
+def _url_ok(v) -> bool:
+    return isinstance(v, str) and (v == "" or (v.startswith(("http://", "https://")) and len(v) <= 300))
+
+
+def ai_info(cfg: dict) -> dict:
+    """What the UI needs to label sends and settings. Never contains a key."""
+    pid = core.provider_id(cfg)
+    return {
+        "provider": pid,
+        "provider_name": core.PROVIDERS[pid]["name"],
+        "provider_short": core.provider_name(cfg, pid),
+        "model": core.provider_model(cfg, pid),
+        "base_url": core.provider_url(cfg, pid),
+        "local": core.PROVIDERS[pid]["local"],
+        "providers": [{"id": k, "name": v["name"], "short": v["short"], "key": v["key"],
+                       "local": v["local"], "models": v["models"], "prefix": v["prefix"],
+                       "default_url": v["url"], "has_key": core.has_api_key(k),
+                       "model": core.provider_model(cfg, k), "base_url": core.provider_url(cfg, k)}
+                      for k, v in core.PROVIDERS.items()],
+    }
 
 
 def session_token() -> str:
@@ -58,17 +85,26 @@ def session_token() -> str:
 
 def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None = None,
                token: str | None = None, port: int = PORT) -> FastAPI:
+    if store is None and not os.environ.get("MN_OUTPUT_DIR"):
+        try:
+            core.migrate_output_root()
+        except OSError:  # keep running on the old folder's content left in place
+            pass
     st = store or store_mod.Store()
     bus = jobs.bus if jobs else jobs_mod.Bus()
     jb = jobs or jobs_mod.Jobs(st, bus)
     tok = token or session_token()
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     origins = {f"http://{h}" for h in hosts}
-    app = FastAPI(title="Meeting Notes", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Meeting Report", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.jobs, app.state.token = st, jb, tok
     app.state.clients = 0
     app.state.last_seen = time.time()
     jb.recover()
+    try:
+        st.migrate_folder_names()
+    except Exception:  # noqa: BLE001 - renaming old folders is a convenience
+        pass
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -82,7 +118,7 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         if path.startswith("/api/") and path != "/api/health":
             given = request.headers.get("x-mn-token") or request.cookies.get(COOKIE)
             if not given or not secrets.compare_digest(given, tok):
-                return JSONResponse({"detail": "Sesi tidak valid. Buka lewat Meeting Notes."}, status_code=401)
+                return JSONResponse({"detail": "Sesi tidak valid. Buka lewat Meeting Report."}, status_code=401)
             app.state.last_seen = time.time()
         resp = await call_next(request)
         resp.headers["Cache-Control"] = "no-store"
@@ -100,9 +136,9 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         cookie = request.cookies.get(COOKIE)
         ok = (t and secrets.compare_digest(t, tok)) or (cookie and secrets.compare_digest(cookie, tok))
         if not ok:
-            return HTMLResponse("<!doctype html><meta charset=utf-8><title>Meeting Notes</title>"
+            return HTMLResponse("<!doctype html><meta charset=utf-8><title>Meeting Report</title>"
                                 "<body style='font:15px -apple-system,sans-serif;padding:40px'>"
-                                "<h3>Sesi tidak valid</h3><p>Buka Meeting Notes dari aplikasinya, atau jalankan "
+                                "<h3>Sesi tidak valid</h3><p>Buka Meeting Report dari aplikasinya, atau jalankan "
                                 "<code>./run.sh dev</code> lalu buka tautan yang dicetak di Terminal.</p>",
                                 status_code=401)
         resp = FileResponse(STATIC / "index.html", media_type="text/html")
@@ -130,9 +166,11 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
     @app.get("/api/state")
     def state():
         cfg = core.load_config()
+        ai = ai_info(cfg)
         return {"version": APP_VERSION, "busy": jb.busy(), "jobs": jb.state(),
-                "api_key": bool(core.get_api_key()), "theme": cfg.get("theme", "system"),
-                "output_root": str(st.root), "models": MODELS, "model": cfg.get("claude_model")}
+                "api_key": core.has_api_key(ai["provider"]), "theme": cfg.get("theme", "system"),
+                "output_root": str(st.root), "models": core.PROVIDERS[ai["provider"]]["models"],
+                "model": ai["model"], "ai": {k: v for k, v in ai.items() if k != "providers"}}
 
     @app.get("/api/events")
     async def events(request: Request):
@@ -179,14 +217,20 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         return file_info(p)
 
     def file_info(p: Path) -> dict:
+        """File card on Rapat baru, checked before Proses (Usulan 15)."""
         if not p.is_file():
             raise HTTPException(400, "File tidak ditemukan")
+        info = core.probe(p)
+        free = core.disk_free(st.root)
+        need = core.disk_need(info.get("duration"), info.get("video"))
         return {"path": str(p), "name": p.name, "size": p.stat().st_size,
-                "audio": p.suffix.lower() in AUDIO_EXT}
+                "audio": p.suffix.lower() in AUDIO_EXT, "probe": info,
+                "default_track": core.default_track(info),
+                "disk": {"free": free, "need": need, "low": free is not None and free < need}}
 
     @app.post("/api/file-info")
     def file_info_ep(body: dict = Body(...)):
-        """File opened from Finder ("Open with Meeting Notes")."""
+        """File opened from Finder ("Open with Meeting Report")."""
         return file_info(Path(str(body.get("path") or "")).expanduser())
 
     @app.post("/api/upload")
@@ -231,7 +275,28 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             name = str(p.get("name", "")).strip()
             if name:
                 parts.append({"id": f"p{i + 1}", "name": name, "role": str(p.get("role") or "").strip()})
-        title = str(body.get("title") or "").strip() or src.stem
+        info = core.probe(src)
+        if not info["ok"]:
+            raise HTTPException(400, info["problem"])
+        free = core.disk_free(st.root)
+        if free is not None and free < core.disk_need(info.get("duration"), info.get("video")):
+            raise HTTPException(507, "Ruang disk tidak cukup. Kosongkan sedikit ruang lalu coba lagi.")
+        track = body.get("audio_track")
+        n_tracks = len(info.get("tracks") or [])
+        if track == "mix" and n_tracks > 1:
+            settings["audio_track"] = "mix"
+        elif isinstance(track, int) and 0 <= track < n_tracks and n_tracks > 1:
+            settings["audio_track"] = track
+        elif n_tracks > 1:
+            settings["audio_track"] = core.default_track(info)
+        settings["video"] = bool(info.get("video"))
+        title = str(body.get("title") or "").strip()
+        if title:
+            bad = core.title_problem(title)
+            if bad:
+                raise HTTPException(400, bad)
+        else:
+            title = core.safe_title(src.stem)
         mid = st.create(src, title, settings, parts)
         incoming = core.SUPPORT_DIR / "incoming"
         if incoming in src.parents:   # dragged in: keep the copy with the meeting
@@ -256,8 +321,9 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             "counts": counts,
             "versions": st.versions(mid) if (p / store_mod.VERS).exists() else [],
             "summary_count": len(sums),
-            "audio": {"asli": bool(m.get("source")) and src.is_file(),
-                      "bersih": (p / "Audio bersih.m4a").exists()},
+            "audio": {"asli": (p / "Audio rapat.m4a").exists() or (bool(m.get("source")) and src.is_file()),
+                      "bersih": (p / "Audio bersih.m4a").exists(),
+                      "rapat": (p / "Audio rapat.m4a").exists()},
             "files": sorted(f.name for f in p.iterdir() if f.is_file() and not f.name.startswith(".")
                             and f.suffix in (".txt", ".md", ".docx", ".m4a")),
             "has_draft": (p / store_mod.DRAFT).exists(),
@@ -274,12 +340,19 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
 
     @app.patch("/api/meetings/{mid}")
     def patch_meeting(mid: str, body: dict = Body(...)):
-        meta_or_404(mid)
-        title = str(body.get("title") or "").strip()
-        if title:
-            st.update(mid, title=title)
-            if st.meta(mid).get("transcript_rev"):
-                st.write_transcript_files(mid)
+        m = meta_or_404(mid)
+        if "title" in body:
+            title = str(body.get("title") or "").strip()
+            bad = core.title_problem(title)
+            if bad:
+                raise HTTPException(400, bad)
+            if title != m.get("title"):
+                if job_on(mid):
+                    raise HTTPException(409, "Rapat ini sedang diproses. Ubah judul setelah selesai.")
+                try:
+                    mid = st.rename(mid, title)
+                except OSError:
+                    raise HTTPException(500, "Folder rapat tidak bisa diganti namanya. Tutup file di Finder lalu coba lagi.")
         return detail(mid)
 
     @app.delete("/api/meetings/{mid}")
@@ -344,6 +417,7 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         except KeyError:
             raise HTTPException(409, "Transkrip belum tersedia")
         low = {s["id"]: s.get("low_words") or [] for s in raw.get("segments", [])}
+        gap_ids = [s["id"] for s in raw.get("segments", []) if s.get("gap_fill")]
         cfg = core.load_config()
         vocab = ", ".join(x for x in [(m.get("settings") or {}).get("vocabulary", ""), cfg.get("vocabulary", "")] if x)
         draft = st.read_draft(mid)
@@ -358,8 +432,67 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             "local": suggest.local_suggestions(segs, parts, vocab, low),
             "claude": claude,
             "low_words": low,
+            "gap_fill": gap_ids,
             "rev_hash": m.get("rev_hash"),
         }
+
+    # ------------------------------------------------------------------ gaps (Usulan 3)
+    @app.get("/api/meetings/{mid}/gaps")
+    def gaps(mid: str):
+        """Speech regions of the recording; the editor compares them with its segments."""
+        m = meta_or_404(mid)
+        reg = st.read_regions(mid)
+        if reg is None:
+            src = Path(m.get("source") or "")
+            if not src.is_file() or job_on(mid) == "transcribe":
+                return {"regions": None, "total": m.get("duration_sec"), "min_gap": gap_min()}
+            try:
+                audio = jobs_mod.load_track(jb.load_audio, str(src), (m.get("settings") or {}).get("audio_track"))
+                regions, _ = core.detect_speech(audio, min_silence=core.load_config().get("min_silence_sec", 2.0))
+                st.save_regions(mid, regions, len(audio) / core.SR)
+                reg = st.read_regions(mid)
+            except Exception:  # noqa: BLE001
+                return {"regions": None, "total": m.get("duration_sec"), "min_gap": gap_min()}
+        return {**reg, "min_gap": gap_min()}
+
+    def gap_min() -> float:
+        return float(core.load_config().get("gap_fill_sec", 3.0) or 3.0)
+
+    @app.post("/api/meetings/{mid}/retranscribe")
+    def retranscribe(mid: str, body: dict = Body(...)):
+        """Transcribe one stretch of the original recording again ("Transkrip ulang bagian ini").
+
+        Returns new segments only; the editor inserts them into the draft, nothing is saved."""
+        m = meta_or_404(mid)
+        try:
+            a, b = float(body.get("start")), float(body.get("end"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Rentang waktu tidak valid")
+        if not (0 <= a < b) or b - a > 600:
+            raise HTTPException(400, "Rentang waktu tidak valid (maksimal 10 menit)")
+        src = Path(m.get("source") or "")
+        if not src.is_file():
+            raise HTTPException(404, "File rekaman asli tidak ditemukan")
+        if not jb.whisper_lock.acquire(blocking=False):
+            raise HTTPException(409, "Whisper sedang mentranskrip rapat lain. Coba lagi setelah selesai.")
+        try:
+            cfg = core.load_config()
+            lo = max(0.0, a - 1.0)
+            audio = jobs_mod.load_track(jb.load_audio, str(src), (m.get("settings") or {}).get("audio_track"),
+                                        start=lo, dur=(b - a) + 2.0)
+            segs = jb.transcribe_chunk(audio, (m.get("settings") or {}).get("language") or None, None,
+                                       cfg.get("whisper_repo", core.WHISPER_REPO), cfg.get("word_confidence", True))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"Transkrip ulang gagal ({type(exc).__name__})")
+        finally:
+            jb.whisper_lock.release()
+        out = []
+        for s in segs or []:
+            st_, en = lo + float(s["start"]), lo + float(s["end"])
+            if a - 0.5 <= (st_ + en) / 2 <= b + 0.5:
+                out.append({"start": round(max(st_, a - 1.0), 2), "end": round(en, 2), "text": s["text"],
+                            "low_words": s.get("low_words") or []})
+        return {"segments": out}
 
     @app.put("/api/meetings/{mid}/draft")
     def put_draft(mid: str, body: dict = Body(...)):
@@ -396,12 +529,14 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         cl = body.get("claude")
         source = "claude" if cl and cl.get("accepted") else ("first" if not m.get("transcript_rev") else "edit")
         res = st.save_version(mid, segs, parts, source=source,
-                              note="Saran Claude diterapkan" if source == "claude" else None)
+                              note="Saran AI diterapkan" if source == "claude" else None)
         if cl:
-            st.update(mid, claude_suggest={"at": store_mod.now_iso(), "accepted": int(cl.get("accepted", 0)),
-                                           "rejected": int(cl.get("rejected", 0))})
             f = st.path(mid) / "saran-claude.json"
             sug = store_mod._read_json(f)
+            st.update(mid, claude_suggest={"at": store_mod.now_iso(), "accepted": int(cl.get("accepted", 0)),
+                                           "rejected": int(cl.get("rejected", 0)),
+                                           "provider": core.PROVIDERS.get((sug or {}).get("provider") or "anthropic",
+                                                                          core.PROVIDERS["anthropic"])["short"]})
             if sug:
                 sug["reviewed"] = True
                 store_mod._write_json(f, sug)
@@ -423,7 +558,7 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
             raise HTTPException(404, "Versi tidak ditemukan")
         return {"changed": res["changed"], "rev": res["rev"], "meeting": detail(mid)}
 
-    # ------------------------------------------------------------------ Claude: preview, summary, suggest
+    # ------------------------------------------------------------------ AI provider: preview, summary, suggest
     @app.post("/api/meetings/{mid}/preview")
     def preview(mid: str, body: dict = Body(default={})):
         m = meta_or_404(mid)
@@ -437,12 +572,12 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
     def make_summary(mid: str, body: dict = Body(...)):
         m = meta_or_404(mid)
         if body.get("confirmed") is not True:
-            raise HTTPException(400, "Pengiriman ke Anthropic harus dikonfirmasi pengguna")
+            raise HTTPException(400, "Pengiriman ke layanan AI harus dikonfirmasi pengguna")
         if not m.get("transcript_rev"):
             raise HTTPException(409, "Simpan transkrip dulu")
         if job_on(mid):
             raise HTTPException(409, "Rapat ini sedang diproses")
-        model = body.get("model") if body.get("model") in MODELS else None
+        model = body.get("model").strip() if _model_ok(body.get("model")) else None
         jb.submit("summary", mid, context=str(body.get("context") or ""), model=model,
                   note=body.get("note"))
         return {"ok": True}
@@ -451,23 +586,25 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
     def claude_suggest(mid: str, body: dict = Body(...)):
         m = meta_or_404(mid)
         if body.get("confirmed") is not True:
-            raise HTTPException(400, "Pengiriman ke Anthropic harus dikonfirmasi pengguna")
+            raise HTTPException(400, "Pengiriman ke layanan AI harus dikonfirmasi pengguna")
         if not m.get("transcript_rev"):
             raise HTTPException(409, "Simpan transkrip dulu")
         if job_on(mid):
             raise HTTPException(409, "Rapat ini sedang diproses")
-        model = body.get("model") if body.get("model") in MODELS else None
+        model = body.get("model").strip() if _model_ok(body.get("model")) else None
         jb.submit("suggest", mid, model=model)
         return {"ok": True}
 
     @app.post("/api/meetings/{mid}/claude-review")
     def claude_review(mid: str, body: dict = Body(...)):
-        """Close the Claude review without changes (counts still mark the meeting)."""
+        """Close the AI suggestion review without changes (counts still mark the meeting)."""
         meta_or_404(mid)
-        st.update(mid, claude_suggest={"at": store_mod.now_iso(), "accepted": int(body.get("accepted", 0)),
-                                       "rejected": int(body.get("rejected", 0))})
         f = st.path(mid) / "saran-claude.json"
         sug = store_mod._read_json(f)
+        st.update(mid, claude_suggest={"at": store_mod.now_iso(), "accepted": int(body.get("accepted", 0)),
+                                       "rejected": int(body.get("rejected", 0)),
+                                       "provider": core.PROVIDERS.get((sug or {}).get("provider") or "anthropic",
+                                                                      core.PROVIDERS["anthropic"])["short"]})
         if sug:
             sug["reviewed"] = True
             store_mod._write_json(f, sug)
@@ -504,7 +641,10 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         if kind == "bersih":
             f = st.path(mid) / "Audio bersih.m4a"
         elif kind == "asli":
-            f = Path(m.get("source") or "")
+            # a video's sound is extracted once, so playback never opens a 1 GB file
+            f = st.path(mid) / "Audio rapat.m4a"
+            if not f.is_file():
+                f = Path(m.get("source") or "")
         else:
             raise HTTPException(404)
         if not f.is_file():
@@ -519,8 +659,10 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
     @app.get("/api/settings")
     def get_settings():
         cfg = core.load_config()
-        return {"config": {k: cfg.get(k) for k in EDITABLE_SETTINGS}, "api_key": bool(core.get_api_key()),
-                "models": MODELS, "output_root": str(st.root), "categories": filters.CATEGORIES}
+        ai = ai_info(cfg)
+        return {"config": {k: cfg.get(k) for k in EDITABLE_SETTINGS}, "api_key": core.has_api_key(ai["provider"]),
+                "models": core.PROVIDERS[ai["provider"]]["models"], "ai": ai,
+                "output_root": str(st.root), "categories": filters.CATEGORIES}
 
     @app.put("/api/settings")
     def put_settings(body: dict = Body(...)):
@@ -528,7 +670,33 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         for k, v in body.items():
             if k not in EDITABLE_SETTINGS:
                 continue
-            if k == "claude_model" and v not in MODELS:
+            if k == "claude_model" and not _model_ok(v):
+                continue
+            if k == "ai_provider":
+                if v in core.PROVIDERS:
+                    cfg[k] = v
+                continue
+            if k == "ai_models":
+                cur = dict(cfg.get("ai_models") or {})
+                for p, mv in (v or {}).items():
+                    if p in core.PROVIDERS and _model_ok(mv):
+                        cur[p] = mv.strip()
+                cfg[k] = cur
+                if cur.get("anthropic"):
+                    cfg["claude_model"] = cur["anthropic"]
+                continue
+            if k == "ai_base_url":
+                cur = dict(cfg.get("ai_base_url") or {})
+                for p, uv in (v or {}).items():
+                    if p in core.PROVIDERS and _url_ok(uv):
+                        cur[p] = uv.strip().rstrip("/")
+                cfg[k] = cur
+                continue
+            if k == "gap_fill_sec":
+                try:
+                    cfg[k] = min(30.0, max(0.0, float(v)))
+                except (TypeError, ValueError):
+                    pass
                 continue
             if k == "redact":
                 cfg["redact"] = {c: bool((v or {}).get(c, cfg["redact"].get(c, True))) for c in filters.CATEGORIES}
@@ -550,31 +718,44 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         core.save_config(cfg)
         return {"vocabulary": cfg["vocabulary"]}
 
+    def provider_arg(body: dict | None) -> str:
+        p = (body or {}).get("provider") or core.provider_id()
+        if p not in core.PROVIDERS:
+            raise HTTPException(400, "Penyedia AI tidak dikenal")
+        return p
+
     @app.post("/api/settings/api-key")
     def set_key(body: dict = Body(...)):
+        p = provider_arg(body)
         key = str(body.get("key") or "").strip()
-        if not key.startswith("sk-ant-"):
-            raise HTTPException(400, "Format API key tidak dikenali (diawali sk-ant-)")
+        if not core.PROVIDERS[p]["key"]:
+            raise HTTPException(400, f"{core.PROVIDERS[p]['short']} tidak memakai API key")
+        bad = core.key_problem(key, p)
+        if bad:
+            raise HTTPException(400, bad)
         try:
-            core.set_api_key(key)
+            core.set_api_key(key, p)
         except (subprocess.CalledProcessError, FileNotFoundError):
             raise HTTPException(500, "Gagal menyimpan ke Keychain")
-        return {"api_key": True}
+        return {"api_key": True, "provider": p}
 
     @app.delete("/api/settings/api-key")
-    def del_key():
-        core.delete_api_key()
-        return {"api_key": bool(core.get_api_key())}
+    def del_key(provider: str = ""):
+        p = provider_arg({"provider": provider})
+        core.delete_api_key(p)
+        return {"api_key": core.has_api_key(p), "provider": p}
 
     @app.post("/api/settings/test-key")
-    def test_key():
-        key = core.get_api_key()
+    def test_key(body: dict = Body(default={})):
+        p = provider_arg(body)
+        cfg = core.load_config()
+        key = jb.api_key(p)
         if not key:
             raise HTTPException(400, "API key belum diisi")
         try:
-            core.test_api_key(key, core.load_config().get("claude_model", core.CLAUDE_MODEL))
+            core.test_api_key(key, core.provider_model(cfg, p), provider=p, base_url=core.provider_url(cfg, p))
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "message": jobs_mod._friendly(exc)}
+            return {"ok": False, "message": jobs_mod._friendly(exc, core.provider_name(cfg, p))}
         return {"ok": True}
 
     @app.get("/api/send-log")
@@ -592,7 +773,7 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "app": "meeting-notes", "version": APP_VERSION}
+        return {"ok": True, "app": "meeting-report", "version": APP_VERSION}
 
     return app
 

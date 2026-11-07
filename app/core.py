@@ -1,4 +1,4 @@
-"""Meeting Notes pipeline: load audio, remove silence, transcribe, summarize, export.
+"""Meeting Report pipeline: load audio, remove silence, transcribe, summarize, export.
 
 Kept free of GUI code so it can be tested on its own. mlx_whisper and anthropic
 are imported lazily inside the functions that need them.
@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import re
+import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,7 +30,9 @@ KEYCHAIN_ACCOUNT = "anthropic-api-key"
 
 SUPPORT_DIR = Path(os.environ.get("MN_SUPPORT_DIR")
                    or Path.home() / "Library" / "Application Support" / "MeetingNotes")
-OUTPUT_ROOT = Path(os.environ.get("MN_OUTPUT_DIR") or Path.home() / "Documents" / "Meeting Notes")
+OUTPUT_ROOT = Path(os.environ.get("MN_OUTPUT_DIR") or Path.home() / "Documents" / "Meeting Report")
+# results folder before v1.3; moved to OUTPUT_ROOT once (migrate_output_root)
+OLD_OUTPUT_ROOT = Path.home() / "Documents" / "Meeting Notes"
 VOICE_MEMOS_DIR = (Path.home() / "Library" / "Group Containers"
                    / "group.com.apple.VoiceMemos.shared" / "Recordings")
 
@@ -46,6 +52,12 @@ DEFAULT_CONFIG = {
     "redact": {"rekening": True, "nik": True, "hp": True, "kartu": True, "npwp": True, "email": True},
     "sensitive_words": "",
     "word_confidence": True,
+    # AI provider for summaries and word suggestions (Usulan 14)
+    "ai_provider": "anthropic",
+    "ai_models": {},
+    "ai_base_url": {},
+    # re-transcribe stretches of speech Whisper skipped (seconds, clean timeline)
+    "gap_fill_sec": 3.0,
 }
 
 
@@ -69,9 +81,31 @@ def save_config(cfg: dict) -> None:
 
 # --------------------------------------------------------------------------- audio
 
-def load_audio(path: str) -> np.ndarray:
-    """Decode any ffmpeg-readable file to 16 kHz mono float32."""
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path),
+def _track_args(track, n_audio: int | None = None) -> list[str]:
+    """ffmpeg arguments that pick one audio track of a video, or mix them all."""
+    if track == "mix" and (n_audio or 0) > 1:
+        return ["-filter_complex", f"amix=inputs={n_audio}:duration=longest:normalize=0", "-vn"]
+    if isinstance(track, int) and track >= 0:
+        return ["-map", f"0:a:{track}", "-vn"]
+    return ["-vn"]
+
+
+def load_audio(path: str, start: float | None = None, dur: float | None = None,
+               track=None) -> np.ndarray:
+    """Decode any ffmpeg-readable file to 16 kHz mono float32 (optionally only a range).
+
+    Video files work too: only the audio is read (ffmpeg streams it, the video is
+    never loaded), so a 1 GB screen recording costs the same memory as its audio:
+    about 0.35 GB of RAM per hour of recording."""
+    rng = []
+    if start is not None:
+        rng += ["-ss", f"{max(0.0, start):.3f}"]
+    if dur is not None:
+        rng += ["-t", f"{max(0.1, dur):.3f}"]
+    n_audio = None
+    if track == "mix":
+        n_audio = len((probe(Path(path)).get("tracks") or []))
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", *rng, "-i", str(path), *_track_args(track, n_audio),
            "-f", "s16le", "-ac", "1", "-ar", str(SR), "-"]
     try:
         proc = subprocess.run(cmd, capture_output=True, check=True)
@@ -84,6 +118,86 @@ def load_audio(path: str) -> np.ndarray:
     if audio.size == 0:
         raise RuntimeError("File tidak berisi audio.")
     return audio
+
+
+VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".qta", ".avi"}
+
+
+def probe(path: Path) -> dict:
+    """Check a recording before processing (Usulan 15): audio tracks, codec, duration.
+
+    Returns {ok, video, duration, tracks: [{n, codec, channels, duration, label}],
+    problem}. Without ffprobe it returns ok=True and unknown=True (checked later)."""
+    path = Path(path)
+    out = {"ok": True, "video": path.suffix.lower() in VIDEO_EXT, "duration": None, "tracks": [],
+           "problem": None, "unknown": False}
+    try:
+        res = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format",
+                              "-show_streams", str(path)], capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        out["unknown"] = True
+        return out
+    except subprocess.TimeoutExpired:
+        out.update(ok=False, problem="File terlalu lama dibaca. Mungkin rusak atau masih disalin.")
+        return out
+    if res.returncode != 0:
+        out.update(ok=False, problem="File rusak atau formatnya tidak dikenali. Coba ekspor ulang, "
+                                     "atau konversi dulu ke m4a.")
+        return out
+    try:
+        data = json.loads(res.stdout or "{}")
+    except ValueError:
+        data = {}
+    fmt = data.get("format") or {}
+    out["duration"] = _finite(fmt.get("duration"))
+    n = 0
+    for st in data.get("streams") or []:
+        kind = st.get("codec_type")
+        if kind == "video" and (st.get("disposition") or {}).get("attached_pic") != 1:
+            out["video"] = True
+        if kind != "audio":
+            continue
+        tags = st.get("tags") or {}
+        d = _finite(st.get("duration")) or out["duration"]
+        label = " · ".join(x for x in [tags.get("title") or tags.get("handler_name") or "",
+                                        tags.get("language") if tags.get("language") not in (None, "und") else ""]
+                           if x and x not in ("SoundHandler", "Core Media Audio"))
+        out["tracks"].append({"n": n, "codec": st.get("codec_name") or "?", "channels": st.get("channels"),
+                              "duration": d, "label": label})
+        n += 1
+    if not out["tracks"]:
+        out.update(ok=False, problem=("Video ini tidak punya suara. Saat merekam layar, pastikan "
+                                      "suara sistem atau mikrofon ikut direkam." if out["video"] else
+                                      "File ini tidak berisi suara."))
+    elif out["duration"] is not None and out["duration"] < 1:
+        out.update(ok=False, problem="Rekaman terlalu pendek (kurang dari 1 detik).")
+    return out
+
+
+def default_track(info: dict):
+    """The longest audio track (screen recorders sometimes add a short or silent one)."""
+    tracks = info.get("tracks") or []
+    if len(tracks) <= 1:
+        return None
+    return max(tracks, key=lambda t: t.get("duration") or 0)["n"]
+
+
+def disk_need(duration: float | None, video: bool) -> int:
+    """Bytes a meeting needs on disk: Audio bersih.m4a (+ Audio rapat.m4a for a video),
+    transcripts and a safety margin. The recording itself is never copied."""
+    hours = max((duration or 0) / 3600, 0.25)
+    per_hour = 30 * 1024 ** 2 * (2 if video else 1)
+    return int(hours * per_hour + 200 * 1024 ** 2)
+
+
+def disk_free(path: Path) -> int | None:
+    p = Path(path)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        return shutil.disk_usage(p).free
+    except OSError:
+        return None
 
 
 @dataclass
@@ -213,7 +327,7 @@ def chunk_bounds(clean: CleanResult, chunk_sec: float = CHUNK_SEC) -> list[tuple
 
 # --------------------------------------------------------------------------- transcription
 
-LOW_WORD_PROB = 0.45      # words below this probability are flagged for review
+LOW_WORD_PROB = 0.30      # words below this probability are flagged for review (Usulan 4)
 
 
 class Cancelled(Exception):
@@ -247,10 +361,13 @@ def transcribe_chunk(audio: np.ndarray, language: str | None, prompt: str | None
     out = []
     for s in result.get("segments", []):
         text = s.get("text", "").strip()
-        if not text:
+        # no letters or digits ("!", "...") = an empty decode, not speech
+        if not text or not re.search(r"\w", text):
             continue
+        lp = _finite(s.get("avg_logprob"))
         # standard Whisper hallucination guard
-        if s.get("no_speech_prob", 0) > 0.6 and s.get("avg_logprob", 0) < -1.0:
+        if _finite(s.get("no_speech_prob")) is not None and s.get("no_speech_prob") > 0.6 \
+                and lp is not None and lp < -1.0:
             continue
         low = []
         for w in s.get("words") or []:
@@ -261,10 +378,59 @@ def transcribe_chunk(audio: np.ndarray, language: str | None, prompt: str | None
             "start": float(s["start"]),
             "end": float(s["end"]),
             "text": text,
-            "avg_logprob": round(float(s.get("avg_logprob", 0.0)), 3),
+            "avg_logprob": round(lp, 3) if lp is not None else None,
             "low_words": [w for w in low if w],
         })
     return out
+
+
+def _finite(x) -> float | None:
+    """A float that JSON can carry; NaN/inf/None become None."""
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def find_gaps(segs: list[dict], length: float, min_gap: float = 3.0) -> list[tuple[float, float]]:
+    """Stretches longer than min_gap with no segment, in the chunk's own (clean) timeline.
+
+    Silence above ~2 s was already removed, so a long empty stretch here is almost
+    always speech that Whisper skipped (it jumps a whole 30 s window sometimes)."""
+    gaps, cursor = [], 0.0
+    for s in sorted(segs, key=lambda x: x["start"]):
+        if s["start"] - cursor > min_gap:
+            gaps.append((cursor, s["start"]))
+        cursor = max(cursor, s["end"])
+    if length - cursor > min_gap:
+        gaps.append((cursor, length))
+    return gaps
+
+
+def fill_gaps(audio: np.ndarray, segs: list[dict], transcribe, min_gap: float = 3.0,
+              pad: float = 1.0) -> tuple[list[dict], list[tuple[float, float, int]]]:
+    """Transcribe each gap again on its own and insert what Whisper finds there.
+
+    `transcribe(audio_slice)` returns segments relative to the slice. Returns the
+    merged segments and [(gap_start, gap_end, n_found)] for the log."""
+    length = len(audio) / SR
+    gaps = find_gaps(segs, length, min_gap)
+    if not gaps:
+        return segs, []
+    out, report = list(segs), []
+    for a, b in gaps:
+        lo, hi = max(0.0, a - pad), min(length, b + pad)
+        found = []
+        for s in transcribe(audio[int(lo * SR):int(hi * SR)]) or []:
+            st, en = lo + s["start"], lo + s["end"]
+            mid = (st + en) / 2
+            if a <= mid <= b:
+                found.append({**s, "start": round(st, 2), "end": round(min(en, hi), 2), "gap_fill": True})
+        out.extend(found)
+        report.append((a, b, len(found)))
+    out.sort(key=lambda x: x["start"])
+    return out, report
 
 
 def place_chunk(clean: CleanResult, chunk_start_sample: int, segs: list[dict]) -> list[dict]:
@@ -333,7 +499,7 @@ def format_transcript(segments: list[dict], title: str, clean: CleanResult | Non
     """Write Transkrip.txt.
 
     With `meta` (v1.1) the header follows the approved sample report: title, date,
-    recording, language, version, tagging status, Claude suggestions and the
+    recording, language, version, tagging status, AI suggestions and the
     participant block. Lines are "[HH:MM:SS] Nama: teks", "(Belum ditandai): teks"
     when a participant list exists but the segment is untagged, or plain text
     when no participants were entered.
@@ -378,10 +544,11 @@ def format_transcript(segments: list[dict], title: str, clean: CleanResult | Non
         L.append(f"Penanda      : {tagged} dari {total} segmen ditandai, {total - tagged} belum ditandai")
     cs = meta.get("claude_suggest")
     if cs:
-        L.append(f"Saran Claude : ✦ Disarankan Claude, {fmt_date_short(dt.datetime.fromisoformat(cs['at']))}"
+        who = f" · {cs['provider']}" if cs.get("provider") else ""
+        L.append(f"Saran AI     : ✦ Disarankan AI{who}, {fmt_date_short(dt.datetime.fromisoformat(cs['at']))}"
                  f" ({cs.get('accepted', 0)} diterima, {cs.get('rejected', 0)} ditolak)")
     else:
-        L.append("Saran Claude : Tidak dijalankan")
+        L.append("Saran AI     : Tidak dijalankan")
     L.append("Timestamp mengacu ke rekaman asli.")
     L.append("")
     if not parts:
@@ -395,7 +562,7 @@ def format_transcript(segments: list[dict], title: str, clean: CleanResult | Non
     for s in segments:
         ts = f"[{fmt_ts(s['start'])}]"
         if s.get("secret"):
-            text = s["text"] + "  (rahasia, tidak dikirim ke Claude)"
+            text = s["text"] + "  (rahasia, tidak dikirim ke layanan AI)"
         else:
             text = s["text"]
         if not parts:
@@ -410,30 +577,156 @@ def format_transcript(segments: list[dict], title: str, clean: CleanResult | Non
 LANG_NAMES = {"id": "Indonesia", "en": "Inggris", "": "Otomatis"}
 
 
-# --------------------------------------------------------------------------- API key (macOS Keychain)
+# --------------------------------------------------------------------------- AI providers + API keys (Keychain)
 
-def get_api_key() -> str | None:
-    env = os.environ.get("ANTHROPIC_API_KEY")
+# Usulan 14: summaries and word suggestions can use any of these. Keys live in the
+# macOS Keychain, one entry per provider. Ollama runs on this Mac and needs no key.
+PROVIDERS = {
+    "anthropic": {"name": "Anthropic (Claude)", "short": "Anthropic", "key": True, "prefix": "sk-ant-",
+                  "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"], "url": "",
+                  "local": False},
+    "openai": {"name": "OpenAI", "short": "OpenAI", "key": True, "prefix": "sk-",
+               "models": ["gpt-5", "gpt-5-mini"], "url": "https://api.openai.com/v1", "local": False},
+    "gemini": {"name": "Google Gemini", "short": "Gemini", "key": True, "prefix": "",
+               "models": ["gemini-2.5-pro", "gemini-2.5-flash"],
+               "url": "https://generativelanguage.googleapis.com/v1beta", "local": False},
+    "compat": {"name": "Kompatibel OpenAI (URL sendiri)", "short": "server kustom", "key": True, "prefix": "",
+               "models": [], "url": "", "local": False},
+    "ollama": {"name": "Lokal di Mac ini (Ollama)", "short": "Ollama lokal", "key": False, "prefix": "",
+               "models": ["qwen3:14b", "llama3.1:8b"], "url": "http://127.0.0.1:11434/v1", "local": True},
+}
+ENV_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY"}
+
+
+def provider_id(cfg: dict | None = None) -> str:
+    p = (cfg or load_config()).get("ai_provider") or "anthropic"
+    return p if p in PROVIDERS else "anthropic"
+
+
+def provider_model(cfg: dict | None = None, provider: str | None = None) -> str:
+    cfg = cfg or load_config()
+    provider = provider or provider_id(cfg)
+    m = (cfg.get("ai_models") or {}).get(provider)
+    if not m and provider == "anthropic":
+        m = cfg.get("claude_model")
+    if not m:
+        models = PROVIDERS[provider]["models"]
+        m = models[0] if models else ""
+    return m
+
+
+def provider_url(cfg: dict | None = None, provider: str | None = None) -> str:
+    cfg = cfg or load_config()
+    provider = provider or provider_id(cfg)
+    return ((cfg.get("ai_base_url") or {}).get(provider) or PROVIDERS[provider]["url"]).rstrip("/")
+
+
+def provider_name(cfg: dict | None = None, provider: str | None = None) -> str:
+    return PROVIDERS[provider or provider_id(cfg)]["short"]
+
+
+def _account(provider: str) -> str:
+    return KEYCHAIN_ACCOUNT if provider == "anthropic" else f"{provider}-api-key"
+
+
+def get_api_key(provider: str | None = None) -> str | None:
+    provider = provider or provider_id()
+    if not PROVIDERS[provider]["key"]:
+        return "local"
+    env = os.environ.get(ENV_KEYS.get(provider, ""), "") if provider in ENV_KEYS else ""
     if env:
         return env
     try:
         out = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE,
-                              "-a", KEYCHAIN_ACCOUNT, "-w"],
+                              "-a", _account(provider), "-w"],
                              capture_output=True, text=True, check=True)
         return out.stdout.strip() or None
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
 
 
-def delete_api_key() -> None:
+def has_api_key(provider: str | None = None) -> bool:
+    provider = provider or provider_id()
+    return not PROVIDERS[provider]["key"] or bool(get_api_key(provider))
+
+
+def delete_api_key(provider: str | None = None) -> None:
     subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE,
-                    "-a", KEYCHAIN_ACCOUNT], capture_output=True)
+                    "-a", _account(provider or provider_id())], capture_output=True)
 
 
-def set_api_key(key: str) -> None:
+def set_api_key(key: str, provider: str | None = None) -> None:
     subprocess.run(["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE,
-                    "-a", KEYCHAIN_ACCOUNT, "-w", key.strip()],
+                    "-a", _account(provider or provider_id()), "-w", key.strip()],
                    capture_output=True, check=True)
+
+
+def key_problem(key: str, provider: str) -> str | None:
+    pre = PROVIDERS[provider]["prefix"]
+    if not key:
+        return "API key kosong"
+    if pre and not key.startswith(pre):
+        return f"Format API key {PROVIDERS[provider]['short']} tidak dikenali (diawali {pre})"
+    return None
+
+
+class AIError(RuntimeError):
+    """Error from a provider, already in plain Indonesian."""
+
+
+def _http_json(url: str, body: dict, headers: dict, timeout: float = 300) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", **headers}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            data = json.loads(exc.read().decode("utf-8", "replace"))
+            err = data.get("error") if isinstance(data, dict) else None
+            detail = (err.get("message") if isinstance(err, dict) else str(err or "")) or ""
+        except Exception:  # noqa: BLE001
+            pass
+        raise AIError(f"HTTP {exc.code}: {detail[:200]}".strip(": ")) from exc
+    except urllib.error.URLError as exc:
+        raise AIError(f"Connection: {exc.reason}") from exc
+
+
+def ai_text(system: str, user: str, api_key: str, model: str = CLAUDE_MODEL,
+            max_tokens: int = 8000, provider: str | None = None, base_url: str | None = None) -> str:
+    """One prompt to the chosen provider, returns the text answer."""
+    cfg = load_config()
+    provider = provider or provider_id(cfg)
+    url = (base_url or provider_url(cfg, provider)).rstrip("/")
+    if provider == "anthropic":
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(model=model, max_tokens=max_tokens, system=system,
+                                     messages=[{"role": "user", "content": user}])
+        return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip()
+    if provider == "gemini":
+        data = _http_json(f"{url}/models/{model}:generateContent",
+                          {"systemInstruction": {"parts": [{"text": system}]},
+                           "contents": [{"role": "user", "parts": [{"text": user}]}],
+                           "generationConfig": {"maxOutputTokens": max_tokens}},
+                          {"x-goog-api-key": api_key})
+        cands = data.get("candidates") or []
+        parts = (cands[0].get("content") or {}).get("parts", []) if cands else []
+        return "".join(p.get("text", "") for p in parts).strip()
+    # openai, compat (any OpenAI-compatible server) and ollama
+    if not url:
+        raise AIError("Alamat server belum diisi di Pengaturan.")
+    headers = {"Authorization": f"Bearer {api_key}"} if PROVIDERS[provider]["key"] else {}
+    body = {"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+    body["max_completion_tokens" if provider == "openai" else "max_tokens"] = max_tokens
+    data = _http_json(f"{url}/chat/completions", body, headers, timeout=900 if provider == "ollama" else 300)
+    choices = data.get("choices") or []
+    return ((choices[0].get("message") or {}).get("content") or "").strip() if choices else ""
+
+
+claude_text = ai_text   # older name, kept for scripts
 
 
 # --------------------------------------------------------------------------- summary
@@ -505,20 +798,6 @@ Gunakan format Markdown persis seperti ini (tanpa teks lain sebelum judul):
 """
 
 
-def claude_text(system: str, user: str, api_key: str, model: str = CLAUDE_MODEL,
-                max_tokens: int = 8000) -> str:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=api_key)
-    msg = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip()
-
-
 def summarize(transcript: str, api_key: str, model: str = CLAUDE_MODEL, context: str = "",
               header: str = "") -> str:
     user = ""
@@ -527,12 +806,14 @@ def summarize(transcript: str, api_key: str, model: str = CLAUDE_MODEL, context:
     user += f"<transkrip>\n{transcript}\n</transkrip>"
     if context.strip():
         user += f"\n\nKonteks tambahan dari pengguna: {context.strip()}"
-    return claude_text(SUMMARY_SYSTEM, user, api_key, model)
+    return ai_text(SUMMARY_SYSTEM, user, api_key, model)
 
 
-def test_api_key(api_key: str, model: str = CLAUDE_MODEL) -> None:
-    """Raise if the key is rejected. Sends no meeting data."""
-    claude_text("Jawab dengan satu kata.", "ok", api_key, model, max_tokens=5)
+def test_api_key(api_key: str, model: str = CLAUDE_MODEL, provider: str | None = None,
+                 base_url: str | None = None) -> None:
+    """Raise if the provider rejects the key or cannot be reached. Sends no meeting data."""
+    ai_text("Jawab dengan satu kata.", "ok", api_key, model, max_tokens=16, provider=provider,
+            base_url=base_url)
 
 
 # --------------------------------------------------------------------------- export
@@ -616,12 +897,108 @@ def markdown_to_docx(md: str, path: Path) -> None:
     doc.save(str(path))
 
 
-def make_output_dir(source: Path, root: Path | None = None, when: dt.datetime | None = None) -> Path:
-    stem = re.sub(r"[^\w\- ]+", "", source.stem).strip() or "Rapat"
-    base = f"{(when or dt.datetime.now()):%Y-%m-%d %H%M} - {stem[:60]}"
-    root = root or OUTPUT_ROOT
+FORBIDDEN_TITLE = re.compile(r"[/:\\]")
+TITLE_MAX = 80
+
+
+def safe_title(title: str) -> str:
+    """Title as it may appear in a Finder folder name: no / : \\, no leading dot."""
+    t = FORBIDDEN_TITLE.sub("-", str(title or ""))
+    t = re.sub(r"[\x00-\x1f]", "", t)
+    t = re.sub(r"\s+", " ", t).strip().lstrip(".").strip()
+    return t[:TITLE_MAX].strip() or "Rapat"
+
+
+def title_problem(title: str) -> str | None:
+    """Validation message for a title typed by the user, or None when it is fine."""
+    t = str(title or "").strip()
+    if not t:
+        return "Judul tidak boleh kosong."
+    bad = FORBIDDEN_TITLE.search(t)
+    if bad:
+        return f"Karakter {bad.group(0)} tidak bisa dipakai di judul karena dilarang di nama folder Mac."
+    if len(t) > TITLE_MAX:
+        return f"Judul maksimal {TITLE_MAX} karakter."
+    return None
+
+
+_REC_NAME = re.compile(r"(20\d{2})(\d{2})(\d{2})[ _-]?(\d{2})(\d{2})(\d{2})")
+
+
+def recording_time(path: Path) -> dt.datetime:
+    """When the meeting was recorded: from a Voice Memos style name (20261105 134717),
+    else the file's creation time, else its modification time."""
+    m = _REC_NAME.search(Path(path).stem)
+    if m:
+        try:
+            return dt.datetime(*(int(x) for x in m.groups()))
+        except ValueError:
+            pass
+    try:
+        st = Path(path).stat()
+        ts = getattr(st, "st_birthtime", None) or st.st_mtime
+        return dt.datetime.fromtimestamp(ts).replace(microsecond=0)
+    except OSError:
+        return dt.datetime.now().replace(microsecond=0)
+
+
+def folder_name(title: str, when: dt.datetime) -> str:
+    return f"{when:%Y-%m-%d %H%M} - {safe_title(title)}"
+
+
+def free_folder(root: Path, base: str, keep: Path | None = None) -> Path:
     folder, n = root / base, 2
-    while folder.exists():
+    while folder.exists() and folder != keep:
         folder, n = root / f"{base} ({n})", n + 1
+    return folder
+
+
+def migrate_output_root(old: Path | None = None, new: Path | None = None) -> list[str]:
+    """Move the results folder from "Meeting Notes" to "Meeting Report" (v1.3).
+
+    Same disk, so this is a rename: nothing is copied or deleted. When the new
+    folder already exists, each meeting folder is moved into it unless a folder
+    with that name is already there (that one stays in the old folder).
+    Absolute paths inside meeting.json that pointed into the old folder are
+    rewritten. Returns what was moved."""
+    old = Path(old or OLD_OUTPUT_ROOT)
+    new = Path(new or OUTPUT_ROOT)
+    if not old.is_dir() or old.resolve() == new.resolve():
+        return []
+    moved = []
+    if not new.exists():
+        new.parent.mkdir(parents=True, exist_ok=True)
+        old.rename(new)
+        moved = [p.name for p in new.iterdir()]
+    else:
+        for p in sorted(old.iterdir()):
+            if p.name.startswith(".") or (new / p.name).exists():
+                continue
+            try:
+                p.rename(new / p.name)
+                moved.append(p.name)
+            except OSError:
+                continue
+    prefix = str(old) + os.sep
+    for name in moved:
+        mf = new / name / "meeting.json"
+        if not mf.is_file():
+            continue
+        try:
+            m = json.loads(mf.read_text(encoding="utf-8"))
+            src = m.get("source")
+            if isinstance(src, str) and src.startswith(prefix):
+                m["source"] = str(new) + os.sep + src[len(prefix):]
+                tmp = mf.with_suffix(".tmp")
+                tmp.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(tmp, mf)
+        except (OSError, ValueError):
+            continue
+    return moved
+
+
+def make_output_dir(title: str, root: Path | None = None, when: dt.datetime | None = None) -> Path:
+    root = root or OUTPUT_ROOT
+    folder = free_folder(root, folder_name(title, when or dt.datetime.now()))
     folder.mkdir(parents=True)
     return folder

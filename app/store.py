@@ -1,4 +1,5 @@
-"""Meeting storage: one folder per meeting under ~/Documents/Meeting Notes.
+"""Meeting storage: one folder per meeting under ~/Documents/Meeting Report
+(the folder keeps its v1 name; the app is now called Meeting Report).
 
 The folder stays the source of truth (no database). Next to the files a user
 already knows (Transkrip.txt, Ringkasan.md/.docx, Audio bersih.m4a) v1.1 keeps:
@@ -30,6 +31,8 @@ META = "meeting.json"
 DRAFT = "draft.json"
 VERS = "versions"
 SUMS = "summaries"
+REGIONS = "regions.json"     # speech regions of the recording (original timeline), in versions/
+MIGRATED = ".folders-v2.1"   # marker: folders already renamed to "date - title"
 
 STATUSES = ("queued", "transcribing", "awaiting_review", "awaiting_confirmation",
             "summarizing", "done", "transcript_only", "failed")
@@ -47,7 +50,8 @@ def _write_json(path: Path, data) -> None:
 
 def _read_json(path: Path, default=None):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        # NaN/Infinity (written by v1.2 for empty Whisper segments) are read as null
+        return json.loads(path.read_text(encoding="utf-8"), parse_constant=lambda _c: None)
     except (OSError, ValueError):
         return default
 
@@ -56,14 +60,18 @@ def canon_segments(segments: list[dict]) -> list[dict]:
     """The part of a segment that counts as content (what a version stores)."""
     out = []
     for s in segments:
-        out.append({
+        row = {
             "id": str(s["id"]),
             "start": round(float(s["start"]), 2),
             "end": round(float(s["end"]), 2),
             "text": str(s.get("text", "")).strip(),
             "speaker_id": s.get("speaker_id") or None,
             "secret": bool(s.get("secret")),
-        })
+        }
+        # only present when true, so hashes of older versions stay the same
+        if s.get("manual"):
+            row["manual"] = True
+        out.append(row)
     return out
 
 
@@ -109,7 +117,7 @@ def change_text(c: dict) -> str:
     if c.get("edited"):
         out.append(f"{c['edited']} segmen diedit")
     if c.get("merged"):
-        out.append(f"{c['merged']} segmen digabung atau dipecah")
+        out.append(f"{c['merged']} segmen digabung, dipecah, dihapus, atau ditambah")
     if c.get("secret"):
         out.append(f"{c['secret']} tanda rahasia diubah")
     return ", ".join(out)
@@ -184,16 +192,19 @@ class Store:
     # ---------------------------------------------------------------- create / list
     def create(self, source: Path, title: str, settings: dict, participants: list[dict],
                when: dt.datetime | None = None) -> str:
+        """New meeting folder named "<recording date> - <title>" (Usulan 11)."""
         self.root.mkdir(parents=True, exist_ok=True)
+        title = (title or "").strip() or source.stem
+        when = (when or core.recording_time(source)).replace(microsecond=0)
         with self.lock:
-            folder = core.make_output_dir(source, self.root, when)
+            folder = core.make_output_dir(title, self.root, when)
             (folder / VERS).mkdir()
             (folder / SUMS).mkdir()
             meta = {
                 "schema": 2,
                 "id": folder.name,
-                "title": title or source.stem,
-                "created": (when or dt.datetime.now()).replace(microsecond=0).isoformat(),
+                "title": title,
+                "created": when.isoformat(),
                 "source": str(source),
                 "source_name": source.name,
                 "language": settings.get("language") or "",
@@ -307,7 +318,8 @@ class Store:
         for i, s in enumerate(segments):
             segs.append({"id": f"s{i + 1:05d}", "start": s["start"], "end": s["end"], "text": s["text"],
                          "speaker_id": None, "secret": False,
-                         "avg_logprob": s.get("avg_logprob"), "low_words": s.get("low_words") or []})
+                         "avg_logprob": s.get("avg_logprob"), "low_words": s.get("low_words") or [],
+                         **({"gap_fill": True} if s.get("gap_fill") else {})})
         with self.lock:
             m = self.meta(mid)
             _write_json(p / VERS / "rev-0.json", {"rev": 0, "created": now_iso(), "source": "whisper",
@@ -438,7 +450,7 @@ class Store:
         when = m.get("saved_at")
         when_txt = f" pada {core.fmt_date_short(dt.datetime.fromisoformat(when))}" if when else ""
         return (f"⚠ Ringkasan ini dibuat dari transkrip versi {s['based_on_rev']}. Transkrip sudah "
-                f"diperbarui ke versi {m['transcript_rev']}{when_txt}. Buka Meeting Notes untuk "
+                f"diperbarui ke versi {m['transcript_rev']}{when_txt}. Buka Meeting Report untuk "
                 f"memperbarui ringkasan.")
 
     def write_summary_files(self, mid: str) -> None:
@@ -474,6 +486,74 @@ class Store:
                 out.append({**s, "meeting": m.get("title"), "id": mid})
         out.sort(key=lambda s: s["at"], reverse=True)
         return out[:limit]
+
+    # ---------------------------------------------------------------- rename
+    def rename(self, mid: str, title: str) -> str:
+        """Change the title and move the folder to "<date> - <title>". Returns the new id."""
+        with self.lock:
+            p = self.path(mid)
+            m = self.meta(mid)
+            title = title.strip()
+            try:
+                when = dt.datetime.fromisoformat(m.get("created") or "")
+            except ValueError:
+                when = dt.datetime.fromtimestamp(p.stat().st_mtime)
+            dest = core.free_folder(self.root, core.folder_name(title, when), keep=p)
+            m["title"] = title
+            if dest != p:
+                os.rename(p, dest)
+                src = m.get("source") or ""
+                if src.startswith(str(p) + os.sep):
+                    m["source"] = str(dest) + src[len(str(p)):]
+                self._text_cache.pop(mid, None)
+            m["id"] = dest.name
+            _write_json(dest / META, m)
+            new = dest.name
+            if m.get("transcript_rev"):
+                self.write_transcript_files(new)
+            if m.get("summaries"):
+                self.write_summary_files(new)
+            return new
+
+    def migrate_folder_names(self, skip: set[str] | None = None) -> list[tuple[str, str]]:
+        """One time (v1.3): folders created by v1.2 were named after the audio file
+        ("2026-11-07 2256 - Audio bersih"); rename them to the meeting title."""
+        marker = core.SUPPORT_DIR / MIGRATED
+        if marker.exists():
+            return []
+        done = []
+        for mid in self.ids():
+            if skip and mid in skip:
+                continue
+            try:
+                m = _read_json(self.root / mid / META)
+                if not m or m.get("v1") or not m.get("title"):
+                    continue
+                if m.get("status") in ("queued", "transcribing", "summarizing"):
+                    continue
+                dm = _V1_DIR.match(mid)
+                if dm and core.safe_title(m["title"]) == re.sub(r" \(\d+\)$", "", dm[6]):
+                    continue
+                new = self.rename(mid, m["title"])
+                if new != mid:
+                    done.append((mid, new))
+            except Exception:  # a folder that cannot be renamed keeps its name
+                continue
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(json.dumps(done, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+        return done
+
+    # ---------------------------------------------------------------- speech regions
+    def save_regions(self, mid: str, regions: list, total: float) -> None:
+        _write_json(self.path(mid) / VERS / REGIONS,
+                    {"total": round(float(total), 2),
+                     "regions": [[round(float(a), 2), round(float(b), 2)] for a, b in regions]})
+
+    def read_regions(self, mid: str) -> dict | None:
+        return _read_json(self.path(mid) / VERS / REGIONS)
 
     # ---------------------------------------------------------------- delete
     def trash(self, mid: str) -> None:

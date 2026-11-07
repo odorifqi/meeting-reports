@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 
@@ -14,15 +15,21 @@ TOKEN = "t" * 40
 HOST = {"host": "127.0.0.1:8765"}
 
 
-def fake_audio(path):
+def fake_audio(path, start=None, dur=None, track=None):
     sr = core.SR
     t = np.arange(int(sr * 6)) / sr
     tone = 0.3 * np.sin(2 * np.pi * 220 * t).astype(np.float32)
     silence = np.zeros(int(sr * 4), dtype=np.float32)
-    return np.concatenate([tone, silence, tone])
+    a = np.concatenate([tone, silence, tone])
+    if start is not None:
+        a = a[int(start * sr):]
+        a = a[:int(dur * sr)] if dur else a
+    return a
 
 
 def fake_chunk(audio, language, prompt, repo, word_confidence):
+    if len(audio) / core.SR < 10:   # a gap being re-transcribed: nothing more found
+        return []
     return [
         {"start": 0.5, "end": 3.0, "text": "Selamat pagi, kita bahas restrukturasi KUR.", "avg_logprob": -0.2,
          "low_words": ["restrukturasi"]},
@@ -47,11 +54,14 @@ def fake_claude(system, user, key, model, max_tokens):
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "SUPPORT_DIR", tmp_path / "support")
+    monkeypatch.setattr(core, "probe", lambda p: {"ok": True, "video": False, "duration": 16.0, "unknown": False,
+                                                  "problem": None, "tracks": [{"n": 0, "codec": "aac", "channels": 1,
+                                                                               "duration": 16.0, "label": ""}]})
     st = store_mod.Store(tmp_path / "out")
     bus = jobs_mod.Bus()
     jb = jobs_mod.Jobs(st, bus, load_audio=fake_audio, transcribe_chunk=fake_chunk,
                        save_m4a=lambda a, p: Path(p).write_bytes(b"m4a"), claude=fake_claude,
-                       api_key=lambda: "sk-ant-x")
+                       api_key=lambda p=None: "sk-ant-x")
     app = server.create_app(st, jb, TOKEN)
     c = TestClient(app, base_url="http://127.0.0.1:8765")
     c.headers.update({"x-mn-token": TOKEN})
@@ -73,10 +83,10 @@ def test_security(env):
     assert c.get("/api/state", headers={"host": "evil.com:8765"}).status_code == 403
     assert c.post("/api/vocabulary", json={"term": "x"}, headers={"origin": "http://evil.com"}).status_code == 403
     assert c.get("/").status_code == 401
-    assert TestClient(c.app, base_url="http://127.0.0.1:8765").get("/api/health").json()["app"] == "meeting-notes"
+    assert TestClient(c.app, base_url="http://127.0.0.1:8765").get("/api/health").json()["app"] == "meeting-report"
     r = TestClient(c.app, base_url="http://127.0.0.1:8765").get(f"/?t={TOKEN}")
     assert r.status_code == 200 and server.COOKIE in r.cookies
-    assert "sk-ant" not in c.get("/api/settings").text
+    assert "sk-ant-x" not in c.get("/api/settings").text and "sk-ant-test" not in c.get("/api/settings").text
 
 
 def test_full_flow(env):
@@ -140,7 +150,7 @@ def test_full_flow(env):
     r = c.post(f"/api/meetings/{mid}/save", json={"segments": segs, "participants": parts,
                                                   "claude": {"accepted": 1, "rejected": 0}}).json()
     assert r["rev"] == 3 and r["meeting"]["claude_suggest"]["accepted"] == 1
-    assert "✦ Disarankan Claude" in (folder / "Transkrip.txt").read_text()
+    assert "✦ Disarankan AI" in (folder / "Transkrip.txt").read_text()
     assert c.get(f"/api/meetings/{mid}/editor").json()["claude"] == []
 
     # update summary -> not stale, ⚠ removed
@@ -149,7 +159,7 @@ def test_full_flow(env):
     m = c.get(f"/api/meetings/{mid}").json()
     assert not m["stale"] and m["summary_count"] == 2
     assert not (folder / "Ringkasan.md").read_text().startswith("⚠")
-    assert "Transkrip sudah melalui saran Claude" in (folder / "Ringkasan.md").read_text()
+    assert "Transkrip sudah melalui saran AI" in (folder / "Ringkasan.md").read_text()
 
     # restore version 1 = new version 4, history kept
     r = c.post(f"/api/meetings/{mid}/restore", json={"rev": 1}).json()
@@ -215,3 +225,195 @@ def test_delete_requires_idle(env, monkeypatch):
     moved = {}
     monkeypatch.setattr(st, "trash", lambda m: moved.setdefault("id", m))
     assert c.delete(f"/api/meetings/{mid}").json() == {"ok": True} and moved["id"] == mid
+
+
+# ---------------------------------------------------------------------------- v1.3
+
+def test_nan_in_old_version_is_readable(env):
+    """v1.2 wrote NaN for empty Whisper segments; the editor got a 500."""
+    c, st, jb, src = env
+    mid = c.post("/api/meetings", json={"source_path": str(src), "title": "Audio NaN"}).json()["id"]
+    wait(jb)
+    f = st.path(mid) / "versions" / "rev-0.json"
+    f.write_text(f.read_text().replace('"avg_logprob": -0.2', '"avg_logprob": NaN'))
+    r = c.get(f"/api/meetings/{mid}/editor")
+    assert r.status_code == 200
+    assert r.json()["base"]["segments"][0]["avg_logprob"] is None
+
+
+def test_title_validation_and_folder_name(env):
+    c, st, jb, src = env
+    r = c.post("/api/meetings", json={"source_path": str(src), "title": "Rapat 1/2"})
+    assert r.status_code == 400 and "/" in r.json()["detail"]
+    r = c.post("/api/meetings", json={"source_path": str(src), "title": "x" * 81})
+    assert r.status_code == 400
+    mid = c.post("/api/meetings", json={"source_path": str(src), "title": "Rapat KUR"}).json()["id"]
+    assert mid.endswith(" - Rapat KUR")          # folder follows the title, not the file name
+    wait(jb)
+    assert c.patch(f"/api/meetings/{mid}", json={"title": "a:b"}).status_code == 400
+    assert c.patch(f"/api/meetings/{mid}", json={"title": " "}).status_code == 400
+    d = c.patch(f"/api/meetings/{mid}", json={"title": "Rapat NPL"}).json()
+    assert d["id"].endswith(" - Rapat NPL") and d["title"] == "Rapat NPL"
+    assert c.get(f"/api/meetings/{mid}").status_code == 404
+    assert (st.root / d["id"] / "meeting.json").exists()
+
+
+def test_recording_time_from_voice_memos_name(tmp_path):
+    f = tmp_path / "20261105 134717.m4a"
+    f.write_bytes(b"x")
+    assert core.recording_time(f).isoformat() == "2026-11-05T13:47:17"
+
+
+def test_folder_migration(env, tmp_path):
+    c, st, jb, src = env
+    mid = c.post("/api/meetings", json={"source_path": str(src), "title": "Koordinasi"}).json()["id"]
+    wait(jb)
+    old = st.root / "2026-11-07 2256 - Audio bersih"
+    (st.root / mid).rename(old)
+    m = store_mod._read_json(old / "meeting.json")
+    m["id"] = old.name
+    store_mod._write_json(old / "meeting.json", m)
+    (core.SUPPORT_DIR / store_mod.MIGRATED).unlink()   # create_app already ran it once
+    done = st.migrate_folder_names()
+    assert done and done[0][1].endswith(" - Koordinasi")
+    assert st.migrate_folder_names() == []        # only once
+
+
+def test_fill_gaps_inserts_skipped_speech():
+    sr = core.SR
+    audio = np.zeros(sr * 20, dtype=np.float32)
+    segs = [{"start": 0.0, "end": 4.0, "text": "a"}, {"start": 12.0, "end": 15.0, "text": "c"}]
+    seen = []
+
+    def again(piece):
+        seen.append(len(piece) / sr)
+        return [{"start": 1.5, "end": 5.0, "text": "b"}]
+
+    out, report = core.fill_gaps(audio, segs, again, min_gap=3.0)
+    assert [s["text"] for s in out][:3] == ["a", "b", "c"]
+    assert out[1]["gap_fill"] and out[1]["start"] == 4.5
+    assert report[0][:2] == (4.0, 12.0) and seen[0] == pytest.approx(10.0)
+    assert core.find_gaps(segs, 15.0, 3.0) == [(4.0, 12.0)]
+    assert core.find_gaps(segs, 15.0, 9.0) == []
+
+
+def test_gaps_and_retranscribe(env):
+    c, st, jb, src = env
+    mid = c.post("/api/meetings", json={"source_path": str(src), "title": "Celah"}).json()["id"]
+    wait(jb)
+    g = c.get(f"/api/meetings/{mid}/gaps").json()
+    assert g["regions"] and g["min_gap"] == 3.0
+    r = c.post(f"/api/meetings/{mid}/retranscribe", json={"start": 0, "end": 12}).json()
+    assert r["segments"] and r["segments"][0]["text"].startswith("Selamat pagi")
+    assert c.post(f"/api/meetings/{mid}/retranscribe", json={"start": 5, "end": 2}).status_code == 400
+
+
+def test_manual_flag_keeps_old_hashes():
+    a = [{"id": "s1", "start": 0, "end": 1, "text": "x"}]
+    b = [{"id": "s1", "start": 0, "end": 1, "text": "x", "manual": False}]
+    assert store_mod.content_hash(a, []) == store_mod.content_hash(b, [])
+    b[0]["manual"] = True
+    assert store_mod.content_hash(a, []) != store_mod.content_hash(b, [])
+
+
+def test_provider_settings(env, monkeypatch):
+    c, st, jb, src = env
+    s = c.put("/api/settings", json={"ai_provider": "ollama", "ai_models": {"ollama": "qwen3:14b"},
+                                     "ai_base_url": {"ollama": "javascript:x"}}).json()
+    assert s["ai"]["provider"] == "ollama" and s["ai"]["local"] and s["api_key"]
+    assert s["ai"]["base_url"] == "http://127.0.0.1:11434/v1"      # bad URL ignored
+    assert c.post("/api/settings/api-key", json={"provider": "anthropic", "key": "abc"}).status_code == 400
+    assert c.post("/api/settings/api-key", json={"provider": "nope", "key": "abc"}).status_code == 400
+    st_ = c.get("/api/state").json()
+    assert st_["ai"]["provider_short"] == "Ollama lokal"
+    c.put("/api/settings", json={"ai_provider": "anthropic"})
+
+
+def test_ai_text_openai_compatible(monkeypatch):
+    sent = {}
+
+    def fake_http(url, body, headers, timeout=300):
+        sent.update(url=url, body=body, headers=headers)
+        return {"choices": [{"message": {"content": " halo "}}]}
+
+    monkeypatch.setattr(core, "_http_json", fake_http)
+    out = core.ai_text("sys", "isi", "k", "gpt-5", 100, provider="openai")
+    assert out == "halo" and sent["url"] == "https://api.openai.com/v1/chat/completions"
+    assert sent["headers"]["Authorization"] == "Bearer k" and sent["body"]["max_completion_tokens"] == 100
+    core.ai_text("sys", "isi", "local", "qwen3:14b", 50, provider="ollama")
+    assert "Authorization" not in sent["headers"] and sent["body"]["max_tokens"] == 50
+
+
+# ---------------------------------------------------------------------------- video (Usulan 15)
+
+def _ffmpeg(*args):
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg tidak ada")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True)
+
+
+def test_probe_video_tracks(tmp_path):
+    v = tmp_path / "rekaman layar.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=black:s=64x64:d=3", "-f", "lavfi", "-i", "sine=f=300:d=3",
+            "-f", "lavfi", "-i", "sine=f=500:d=2", "-map", "0", "-map", "1", "-map", "2", "-shortest",
+            "-c:v", "libx264", "-c:a", "aac", str(v))
+    info = core.probe(v)
+    assert info["ok"] and info["video"] and len(info["tracks"]) == 2
+    assert core.default_track(info) is not None
+    a0 = core.load_audio(str(v), track=0)
+    mix = core.load_audio(str(v), track="mix")
+    assert abs(len(a0) / core.SR - 2) < 0.3 and len(mix) > 0   # -shortest cut the file to 2 s
+
+    mute = tmp_path / "tanpa suara.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "color=c=black:s=64x64:d=2", "-c:v", "libx264", str(mute))
+    m = core.probe(mute)
+    assert not m["ok"] and "tidak punya suara" in m["problem"]
+
+    bad = tmp_path / "rusak.mp4"
+    bad.write_bytes(b"bukan video")
+    assert not core.probe(bad)["ok"]
+
+
+def test_video_meeting_gets_audio_rapat(env, tmp_path, monkeypatch):
+    c, st, jb, src = env
+    monkeypatch.setattr(core, "probe", lambda p: {"ok": True, "video": True, "duration": 16.0, "unknown": False,
+                                                  "problem": None, "tracks": [
+                                                      {"n": 0, "codec": "aac", "channels": 2, "duration": 16.0, "label": ""},
+                                                      {"n": 1, "codec": "aac", "channels": 1, "duration": 4.0, "label": "Mic"}]})
+    v = tmp_path / "zoom.mp4"
+    v.write_bytes(b"x")
+    info = c.post("/api/file-info", json={"path": str(v)}).json()
+    assert info["probe"]["video"] and info["default_track"] == 0 and "disk" in info
+    mid = c.post("/api/meetings", json={"source_path": str(v), "title": "Rapat Zoom", "audio_track": "mix"}).json()["id"]
+    wait(jb)
+    m = c.get(f"/api/meetings/{mid}").json()
+    assert m["settings"]["audio_track"] == "mix" and m["audio"]["rapat"]
+    assert (st.path(mid) / "Audio rapat.m4a").exists()
+
+
+def test_video_without_sound_is_refused(env, tmp_path, monkeypatch):
+    c, st, jb, src = env
+    monkeypatch.setattr(core, "probe", lambda p: {"ok": False, "video": True, "duration": 5.0, "tracks": [],
+                                                  "unknown": False, "problem": "Video ini tidak punya suara."})
+    r = c.post("/api/meetings", json={"source_path": str(src), "title": "Bisu"})
+    assert r.status_code == 400 and "suara" in r.json()["detail"]
+
+
+def test_migrate_output_root(tmp_path):
+    old, new = tmp_path / "Meeting Notes", tmp_path / "Meeting Report"
+    (old / "2026-11-05 1347 - KUR").mkdir(parents=True)
+    (old / "2026-11-05 1347 - KUR" / "meeting.json").write_text(json.dumps(
+        {"title": "KUR", "source": str(old / "2026-11-05 1347 - KUR" / "Rekaman asli.m4a")}))
+    (old / "2026-11-06 0900 - Lain").mkdir()
+    moved = core.migrate_output_root(old, new)
+    assert not old.exists() and sorted(moved) == ["2026-11-05 1347 - KUR", "2026-11-06 0900 - Lain"]
+    m = json.loads((new / "2026-11-05 1347 - KUR" / "meeting.json").read_text())
+    assert m["source"] == str(new / "2026-11-05 1347 - KUR" / "Rekaman asli.m4a")
+    assert core.migrate_output_root(old, new) == []
+    # both exist: move what does not clash, leave the clash in the old folder
+    (old / "a").mkdir(parents=True)
+    (old / "2026-11-06 0900 - Lain").mkdir()
+    assert core.migrate_output_root(old, new) == ["a"]
+    assert (new / "a").is_dir() and (old / "2026-11-06 0900 - Lain").is_dir()

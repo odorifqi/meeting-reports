@@ -1,9 +1,9 @@
 """F15: local filter that runs before any text leaves the Mac.
 
-Every send to Anthropic (summary or Claude suggestions) goes through
+Every send to an AI provider (summary or AI suggestions) goes through
 `build_send`. Sensitive values are replaced by tokens such as ‹REKENING_1›,
 segments marked Rahasia are withheld, and the token map stays on this Mac so
-`restore` can put the real values back into Claude's answer.
+`restore` can put the real values back into the model's answer.
 """
 from __future__ import annotations
 

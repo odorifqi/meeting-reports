@@ -1,0 +1,35 @@
+import core
+import suggest
+
+
+def test_prompts_are_not_tied_to_one_organization():
+    for text in (core.SUMMARY_SYSTEM, suggest.CLAUDE_SYSTEM):
+        assert "bank" not in text.lower()
+    assert "bukan rapat" in core.SUMMARY_SYSTEM
+    assert core.whisper_prompt("xG, pressing", ["Andi"]) == "Istilah: xG, pressing. Peserta: Andi."
+    assert core.whisper_prompt() is None
+
+
+def _docx_lines(md, tmp_path):
+    from docx import Document
+    path = tmp_path / "r.docx"
+    core.markdown_to_docx(md, path)
+    return [p.text for p in Document(str(path)).paragraphs if p.text]
+
+
+def test_docx_numbers_each_list_from_its_own_start(tmp_path):
+    md = ("## Poin Pembahasan\n1. Satu\n\n1. Dua\n1. Tiga\n\n"
+          "## Keputusan\n1. Putusan A\n2. Putusan B\n")
+    lines = _docx_lines(md, tmp_path)
+    assert lines == ["Poin Pembahasan", "1.\tSatu", "2.\tDua", "3.\tTiga",
+                     "Keputusan", "1.\tPutusan A", "2.\tPutusan B"]
+
+
+def test_docx_bold_with_italic_inside(tmp_path):
+    from docx import Document
+    path = tmp_path / "r.docx"
+    core.markdown_to_docx("**Kelemahan *half space***. Lalu **Pressing** dan *miring*.", path)
+    runs = [(r.text, bool(r.bold), bool(r.italic)) for r in Document(str(path)).paragraphs[0].runs]
+    assert ("Kelemahan half space", True, False) in runs
+    assert ("miring", False, True) in runs
+    assert "*" not in "".join(t for t, _, _ in runs)

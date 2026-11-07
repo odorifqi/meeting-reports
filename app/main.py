@@ -1,4 +1,4 @@
-"""Meeting Notes v1.2 launcher (what the .app runs).
+"""Meeting Report launcher (what the .app runs).
 
 Starts the local server on 127.0.0.1 if it is not running yet, then opens the
 UI in a native macOS window (pywebview / WKWebView). Closing the window does
@@ -26,12 +26,30 @@ BASE = f"http://127.0.0.1:{PORT}"
 IDLE_MIN = os.environ.get("MN_IDLE_MIN", "30")
 
 
-def healthy() -> bool:
+def health() -> dict | None:
     try:
         with urllib.request.urlopen(f"{BASE}/api/health", timeout=1.5) as r:
-            return json.load(r).get("app") == "meeting-notes"
+            return json.load(r)
     except Exception:
-        return False
+        return None
+
+
+def healthy() -> bool:
+    h = health() or {}
+    return h.get("app") == "meeting-report" and h.get("version") == server.APP_VERSION
+
+
+def stop_old_server() -> None:
+    """A server from an older version (e.g. Meeting Notes 1.2) still running after an
+    update would serve the old screens: stop it once a job is not running."""
+    h = health()
+    if not h or healthy():
+        return
+    subprocess.run(["pkill", "-f", str(HERE / "server.py")], capture_output=True)
+    for _ in range(25):
+        if not health():
+            return
+        time.sleep(0.2)
 
 
 def start_server() -> None:
@@ -45,11 +63,24 @@ def start_server() -> None:
         if healthy():
             return
         time.sleep(0.2)
-    raise RuntimeError(f"Server Meeting Notes tidak menyala. Lihat {logs / 'server.log'}")
+    raise RuntimeError(f"Server Meeting Report tidak menyala. Lihat {logs / 'server.log'}")
+
+
+def on_drop(window, e) -> None:
+    """Drag a recording into the window: pass its path, so a 1 GB video is read where
+    it is instead of being copied in (Usulan 15)."""
+    try:
+        files = (e.get("dataTransfer") or {}).get("files") or []
+        path = files[0].get("pywebviewFullPath") if files else None
+    except Exception:  # noqa: BLE001
+        path = None
+    if path:
+        window.evaluate_js(f"window.MN && window.MN.dropPath({json.dumps(path)})")
 
 
 def main() -> None:
     if not healthy():
+        stop_old_server()
         start_server()
     url = f"{BASE}/?t={server.session_token()}"
     try:
@@ -57,9 +88,17 @@ def main() -> None:
     except ImportError:
         subprocess.run(["open", url])
         return
-    webview.create_window("Meeting Notes", url, width=1180, height=780, min_size=(920, 600),
-                          text_select=True)
-    webview.start(private_mode=False)
+    window = webview.create_window("Meeting Report", url, width=1180, height=780, min_size=(920, 600),
+                                   text_select=True)
+
+    def bind(win):
+        try:
+            from webview.dom import DOMEventHandler
+            win.dom.document.events.drop += DOMEventHandler(lambda e: on_drop(win, e), False, False)
+        except Exception:  # noqa: BLE001 - older pywebview: dropping falls back to copying
+            pass
+
+    webview.start(bind, window, private_mode=False)
 
 
 if __name__ == "__main__":

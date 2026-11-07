@@ -1,7 +1,7 @@
 """One background worker for the heavy jobs (PRD: one job at a time).
 
-Jobs: transcribe (local Whisper), summary (Claude, after confirmation) and
-suggest (optional Claude word suggestions). Progress goes to meeting.json and
+Jobs: transcribe (local Whisper), summary (the chosen AI provider, after
+confirmation) and suggest (optional AI word suggestions). Progress goes to meeting.json and
 to every open window through the event bus (SSE). Logs never contain
 transcript text.
 """
@@ -23,6 +23,16 @@ import store as store_mod
 import suggest
 
 PARTS = ".parts"
+
+
+def load_track(load_audio, path: str, track=None, start=None, dur=None):
+    """Call load_audio with only the arguments it needs (tests pass simpler fakes)."""
+    kw = {}
+    if start is not None:
+        kw.update(start=start, dur=dur)
+    if track is not None:
+        kw["track"] = track
+    return load_audio(path, **kw)
 
 
 class Bus:
@@ -91,7 +101,7 @@ def postprocess_summary(md: str, meta: dict, version: dict, model: str, send: di
     notes = []
     cs = meta.get("claude_suggest")
     if cs:
-        notes.append(f"- Transkrip sudah melalui saran Claude (✦ Disarankan Claude: {cs.get('accepted', 0)} "
+        notes.append(f"- Transkrip sudah melalui saran AI (✦ Disarankan AI: {cs.get('accepted', 0)} "
                      f"diterima, {cs.get('rejected', 0)} ditolak).")
     if send.get("masked") or send.get("withheld"):
         notes.append(f"- {send.get('masked', 0)} data sensitif disamarkan sebelum dikirim dan dipulihkan di Mac ini; "
@@ -113,7 +123,7 @@ def postprocess_summary(md: str, meta: dict, version: dict, model: str, send: di
                 lines[idx + 1:end] = notes
             else:
                 lines[end:end] = notes
-    # drop any footer Claude wrote itself, then add ours
+    # drop any footer the model wrote itself, then add ours
     while lines and (not lines[-1].strip() or lines[-1].strip() == "---"):
         lines.pop()
     lines += ["", "---", f"_Dibuat {core.fmt_date_short(dt.datetime.now())} · {model} · dari transkrip versi {rev}_"]
@@ -128,7 +138,7 @@ class Jobs:
         self.load_audio = load_audio or core.load_audio
         self.transcribe_chunk = transcribe_chunk or core.transcribe_chunk
         self.save_m4a = save_m4a or core.save_audio_m4a
-        self.claude = claude or core.claude_text
+        self.claude = claude or core.ai_text
         self.api_key = api_key or core.get_api_key
         self.config = config or core.load_config
         self.q: queue.Queue = queue.Queue()
@@ -136,6 +146,8 @@ class Jobs:
         self.pending: list[dict] = []
         self.cancelled: set[str] = set()
         self.last_activity = time.time()
+        # Whisper uses the GPU; the worker and "Transkrip ulang bagian ini" never run together
+        self.whisper_lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True, name="mn-worker")
         self._thread.start()
 
@@ -189,8 +201,10 @@ class Jobs:
         self._emit(mid, kind="log", text=text)
 
     def _progress(self, mid: str, **p) -> None:
-        self.store.update(mid, progress=p)
-        self._emit(mid, kind="progress", progress=p)
+        m = self.store.update(mid, progress=p)
+        # durations ride along so the step list updates without a full reload
+        self._emit(mid, kind="progress", progress=p, duration_sec=m.get("duration_sec"),
+                   clean_sec=m.get("clean_sec"))
 
     def _run(self) -> None:
         while True:
@@ -216,7 +230,7 @@ class Jobs:
         parts_dir = folder / PARTS
         fp = json.dumps({"lang": s.get("language"), "rs": s.get("remove_silence", True),
                          "vocab": s.get("vocabulary", ""), "repo": cfg.get("whisper_repo"),
-                         "ms": cfg.get("min_silence_sec")}, sort_keys=True)
+                         "ms": cfg.get("min_silence_sec"), "track": s.get("audio_track")}, sort_keys=True)
         if parts_dir.exists() and (parts_dir / "settings.json").exists() and \
                 (parts_dir / "settings.json").read_text() != fp:
             shutil.rmtree(parts_dir)
@@ -230,11 +244,26 @@ class Jobs:
                 raise RuntimeError(f"File rekaman tidak ditemukan: {src.name}")
             self._progress(mid, phase="decode", pct=0, chunk=0, chunks=0, eta=None)
             self._log(mid, "Membaca rekaman")
-            audio = self.load_audio(str(src))
+            free = core.disk_free(folder)
+            if free is not None and free < core.disk_need(m.get("duration_sec"), s.get("video")):
+                raise RuntimeError("Ruang disk tidak cukup untuk menyimpan hasil. Kosongkan sedikit ruang lalu coba lagi.")
+            audio = load_track(self.load_audio, str(src), s.get("audio_track"))
             dur = len(audio) / core.SR
+            if s.get("video") and not (folder / "Audio rapat.m4a").exists():
+                # sound of the video for playback in the editor (timestamps = original)
+                try:
+                    self.save_m4a(audio, folder / "Audio rapat.m4a")
+                    self._log(mid, "Suara video disimpan sebagai Audio rapat.m4a")
+                except Exception as exc:  # noqa: BLE001 - playback falls back to the video
+                    self._log(mid, f"Audio rapat gagal disimpan ({type(exc).__name__})")
             clean = core.clean_audio(audio, s.get("remove_silence", True), cfg.get("min_silence_sec", 2.0))
             self._log(mid, f"Durasi {core.fmt_dur(dur)}, setelah buang hening {core.fmt_dur(clean.clean_sec)}")
             st.update(mid, duration_sec=round(dur, 1), clean_sec=round(clean.clean_sec, 1))
+            # where someone speaks, used by the editor to point at skipped stretches
+            regions = clean.regions if s.get("remove_silence", True) else \
+                core.detect_speech(audio, min_silence=cfg.get("min_silence_sec", 2.0))[0]
+            st.save_regions(mid, regions, dur)
+            gap_sec = float(cfg.get("gap_fill_sec", 3.0) or 0)
             if s.get("save_clean_audio", True) and s.get("remove_silence", True) and \
                     not (folder / "Audio bersih.m4a").exists():
                 try:
@@ -264,8 +293,20 @@ class Jobs:
                                chunks=n, eta=eta)
                 self._log(mid, f"Mentranskrip bagian {chunk_i + 1} dari {n}")
                 t0 = time.time()
-                segs = self.transcribe_chunk(clean.audio[a:b], lang, prompt, cfg.get("whisper_repo", core.WHISPER_REPO),
-                                             cfg.get("word_confidence", True))
+                repo = cfg.get("whisper_repo", core.WHISPER_REPO)
+                wc = cfg.get("word_confidence", True)
+                with self.whisper_lock:
+                    segs = self.transcribe_chunk(clean.audio[a:b], lang, prompt, repo, wc)
+                    if gap_sec > 0:
+                        # Whisper sometimes skips a whole 30 s window; try those stretches again
+                        # on their own, without the prompt (Usulan 3)
+                        segs, report = core.fill_gaps(
+                            clean.audio[a:b], segs,
+                            lambda piece: self.transcribe_chunk(piece, lang, None, repo, wc), gap_sec)
+                        for ga, gb, found in report:
+                            oa = clean.to_original(a / core.SR + ga)
+                            ob = clean.to_original(a / core.SR + gb)
+                            self._log(mid, f"Celah {core.fmt_ts(oa)}–{core.fmt_ts(ob)} diisi ulang ({found} segmen)")
                 placed = core.place_chunk(clean, a, segs)
                 part.write_text(json.dumps(placed, ensure_ascii=False), encoding="utf-8")
                 segments.extend(placed)
@@ -300,7 +341,9 @@ class Jobs:
         m = st.meta(mid)
         prev = m.get("status") if m.get("status") != "summarizing" else (m.get("prev_status") or "transcript_only")
         cfg = self.config()
-        model = model or cfg.get("claude_model") or core.CLAUDE_MODEL
+        provider = core.provider_id(cfg)
+        pname = core.provider_name(cfg, provider)
+        model = model or core.provider_model(cfg, provider)
         v = st.latest(mid)
         send = filters.build_send(m, v, cfg, context)
         st.update(mid, status="summarizing", prev_status=prev, summary_error=None)
@@ -308,13 +351,13 @@ class Jobs:
                        model=model)
         self._emit(mid, kind="status", status="summarizing")
         try:
-            key = self.api_key()
+            key = self.api_key(provider)
             if not key:
-                raise RuntimeError("API key Anthropic belum diisi. Buka Pengaturan.")
+                raise RuntimeError(f"API key {pname} belum diisi. Buka Pengaturan.")
             user = f"<info_rapat>\n{send['header']}\n</info_rapat>\n\n<transkrip>\n{send['transcript']}\n</transkrip>"
             if send["context"]:
                 user += f"\n\nKonteks tambahan dari pengguna: {send['context']}"
-            st.log_send(mid, {"kind": "summary", "model": model, "words": send["words"],
+            st.log_send(mid, {"kind": "summary", "provider": provider, "model": model, "words": send["words"],
                               "masked": send["masked"], "withheld": send["withheld"], "rev": m.get("transcript_rev")})
             raw = self.claude(core.SUMMARY_SYSTEM, user, key, model, 8000)
             self._progress(mid, phase="restore", masked=send["masked"], withheld=send["withheld"],
@@ -322,52 +365,59 @@ class Jobs:
             md = filters.restore(raw, send["tokens"])
             md = postprocess_summary(md, st.meta(mid), v, model, send)
             ver = st.add_summary(mid, md, m.get("transcript_rev"), model, context,
-                                 {"counts": send["counts"], "withheld": send["withheld"]}, note=note)
+                                 {"counts": send["counts"], "withheld": send["withheld"]}, note=note,
+                                 source=provider)
             st.update(mid, status="done", progress=None, prev_status=None)
             self._log(mid, f"Ringkasan versi {ver} dibuat ({model})")
             self._emit(mid, kind="status", status="done", summary=ver)
         except Exception as exc:  # noqa: BLE001
             st.update(mid, status=prev, progress=None, prev_status=None,
-                      summary_error=_friendly(exc))
+                      summary_error=_friendly(exc, pname))
             self._log(mid, f"Ringkasan gagal: {type(exc).__name__}")
             self._emit(mid, kind="status", status=prev, error=True)
 
-    # ---------------------------------------------------------------- Claude suggestions
+    # ---------------------------------------------------------------- AI suggestions
     def _job_suggest(self, mid: str, model: str | None = None) -> None:
         st = self.store
         m = st.meta(mid)
         cfg = self.config()
-        model = model or cfg.get("claude_model") or core.CLAUDE_MODEL
+        provider = core.provider_id(cfg)
+        pname = core.provider_name(cfg, provider)
+        model = model or core.provider_model(cfg, provider)
         st.update(mid, suggest_job={"state": "running", "at": store_mod.now_iso()})
         self._emit(mid, kind="suggest", state="running")
         try:
-            key = self.api_key()
+            key = self.api_key(provider)
             if not key:
-                raise RuntimeError("API key Anthropic belum diisi. Buka Pengaturan.")
+                raise RuntimeError(f"API key {pname} belum diisi. Buka Pengaturan.")
             v = st.latest(mid)
             vocab = (m.get("settings") or {}).get("vocabulary", "") or cfg.get("vocabulary", "")
             items, send = suggest.claude_suggestions(m, v, cfg, key, model, vocab, call=self.claude)
-            st.log_send(mid, {"kind": "suggest", "model": model, "words": send["words"], "masked": send["masked"],
+            st.log_send(mid, {"kind": "suggest", "provider": provider, "model": model, "words": send["words"], "masked": send["masked"],
                               "withheld": send["withheld"], "rev": m.get("transcript_rev")})
             store_mod._write_json(st.path(mid) / "saran-claude.json",
                                   {"at": store_mod.now_iso(), "based_on_rev": m.get("transcript_rev"),
-                                   "model": model, "items": items})
+                                   "provider": provider, "model": model, "items": items})
             st.update(mid, suggest_job={"state": "ready", "count": len(items), "at": store_mod.now_iso()})
             self._emit(mid, kind="suggest", state="ready", count=len(items))
         except Exception as exc:  # noqa: BLE001
-            st.update(mid, suggest_job={"state": "failed", "error": _friendly(exc)})
+            st.update(mid, suggest_job={"state": "failed", "error": _friendly(exc, pname)})
             self._emit(mid, kind="suggest", state="failed")
 
 
-def _friendly(exc: Exception) -> str:
+def _friendly(exc: Exception, provider: str = "Anthropic") -> str:
     name = type(exc).__name__
     msg = str(exc)
-    if "Authentication" in name or "401" in msg:
-        return "API key ditolak Anthropic. Periksa di Pengaturan."
+    if "Authentication" in name or "401" in msg or "403" in msg:
+        return f"API key ditolak {provider}. Periksa di Pengaturan."
     if "RateLimit" in name or "429" in msg:
         return "Batas pemakaian API tercapai. Coba lagi beberapa menit lagi."
-    if "Connection" in name or "Timeout" in name:
-        return "Tidak bisa terhubung ke Anthropic. Periksa koneksi internet."
-    if "Overloaded" in msg or "529" in msg:
-        return "Server Anthropic sedang sibuk. Coba lagi."
+    if "Connection" in name or "Timeout" in name or msg.startswith("Connection"):
+        if provider == "Ollama lokal":
+            return "Ollama tidak berjalan di Mac ini. Buka Ollama, lalu coba lagi."
+        return f"Tidak bisa terhubung ke {provider}. Periksa koneksi internet."
+    if "Overloaded" in msg or "529" in msg or "503" in msg:
+        return f"Server {provider} sedang sibuk. Coba lagi."
+    if "404" in msg:
+        return f"Model tidak ditemukan di {provider}. Periksa nama model di Pengaturan."
     return msg or name

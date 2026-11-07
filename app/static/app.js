@@ -1,4 +1,4 @@
-/* Meeting Notes v1.2 UI. Plain JS, no build step, no external requests.
+/* Meeting Report v1.3 UI (was Meeting Notes v1.2). Plain JS, no build step, no external requests.
    Screens follow the approved hi-fi prototype: S1 Riwayat, S2 Rapat baru, S3/S3b progres,
    S4 tinjau / S4b edit transkrip, S4c bandingkan, S5 meringkas, S6 detail (transkrip,
    ringkasan, audio), S6e/S6f riwayat versi, S7 pengaturan, sheets M1 M2 M2b M4 M5. */
@@ -13,7 +13,9 @@ const clone = o => JSON.parse(JSON.stringify(o));
 const P = {
   list: '<path d="M5.5 4h8M5.5 8h8M5.5 12h8"/><path d="M2.5 4h0M2.5 8h0M2.5 12h0" stroke-width="2"/>',
   plus: '<path d="M8 3v10M3 8h10"/>',
-  gear: '<circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M3.6 12.4l1.2-1.2M11.2 4.8l1.2-1.2"/>',
+  gear: '<g transform="scale(.6667)" stroke-width="2.25"><path d="M10.3 2.6h3.4l.5 2.6a7.4 7.4 0 0 1 1.9 1.1l2.5-.9 1.7 2.9-2 1.7a7.6 7.6 0 0 1 0 2.2l2 1.7-1.7 2.9-2.5-.9a7.4 7.4 0 0 1-1.9 1.1l-.5 2.6h-3.4l-.5-2.6a7.4 7.4 0 0 1-1.9-1.1l-2.5.9-1.7-2.9 2-1.7a7.6 7.6 0 0 1 0-2.2l-2-1.7 1.7-2.9 2.5.9a7.4 7.4 0 0 1 1.9-1.1z"/><circle cx="12" cy="12" r="3"/></g>',
+  grip: '<path d="M6 3.5h0M10 3.5h0M6 8h0M10 8h0M6 12.5h0M10 12.5h0" stroke-width="2.2"/>',
+  ins: '<path d="M2.5 3.5h11M2.5 12.5h11"/><path d="M8 5.8v4.4M5.8 8h4.4"/>',
   search: '<circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 13.5 13.5"/>',
   play: '<path d="M5 3.2v9.6L12.6 8z" fill="currentColor" stroke="none"/>',
   pause: '<path d="M5.5 3.5v9M10.5 3.5v9" stroke-width="2.4"/>',
@@ -88,7 +90,7 @@ const S = {
   vsel: 'latest', s6q: '', s6spk: 'all', hl: null,
   sum: null, ssel: 'latest',
   ed: null,               // editor state
-  diff: { mode: 'side', only: true, tags: true, cur: 0, left: 'saved' },
+  diff: { mode: 'side', only: true, tags: true, cur: 0, left: 'whisper', revs: [] },
   hist: { left: null, right: 'latest', L: null, R: null },
   shist: { left: null, right: 'latest', L: null, R: null },
   modal: null, ctx: '', prev: null, prevOpen: false,
@@ -105,13 +107,52 @@ function applyTheme(t) {
 }
 applyTheme(theme);
 
-function toast(text, undo) {
-  S.toast = { text, undo };
+function toast(text, undo, kind) {
+  S.toast = { text, undo, kind: kind || 'ok' };
   clearTimeout(toast.h);
-  toast.h = setTimeout(() => { S.toast = null; render(); }, undo ? 6000 : 2800);
-  render();
+  toast.h = setTimeout(() => { S.toast = null; patchToast(); }, undo ? 6000 : kind === 'bad' ? 5000 : 2800);
+  patchToast();
 }
-function fail(e) { toast(e && e.message ? e.message : String(e)); }
+function toastHTML() {
+  const t = S.toast; if (!t) return '';
+  return `<div class="toast${t.kind === 'bad' ? ' bad' : ''}" role="${t.kind === 'bad' ? 'alert' : 'status'}">${ic(t.kind === 'bad' ? 'warn' : t.kind === 'info' ? 'info' : 'check')}<span>${esc(t.text)}</span>${t.undo ? `<button class="btn" data-act="undo">Urungkan</button>` : ''}</div>`;
+}
+// the toast is patched on its own so it never re-renders a long transcript
+function patchToast() {
+  const w = document.querySelector('#app .win'); if (!w) return;
+  const old = w.querySelector(':scope > .toast'); if (old) old.remove();
+  if (S.toast) w.insertAdjacentHTML('beforeend', toastHTML());
+}
+function fail(e) { toast(e && e.message ? e.message : String(e), null, 'bad'); }
+/* AI provider labels (Usulan 14). The key itself never reaches the browser. */
+const AI = () => (S.state && S.state.ai) || { provider: 'anthropic', provider_short: 'Anthropic', provider_name: 'Anthropic (Claude)', local: false, model: '' };
+const toAI = () => AI().local ? 'model lokal di Mac ini (Ollama)' : esc(AI().provider_name);
+/* titles become Finder folder names: / : \ are not allowed (Usulan 11) */
+const BAD_T = /[\/:\\]/, BAD_TG = /[\/:\\]/g, TITLE_MAX = 80;
+function titleMsg(v) {
+  if (!String(v || '').trim()) return 'Judul tidak boleh kosong.';
+  if (BAD_T.test(v)) return 'Karakter / : \\ tidak bisa dipakai karena dilarang di nama folder Mac.';
+  if (v.length > TITLE_MAX) return `Judul maksimal ${TITLE_MAX} karakter.`;
+  return '';
+}
+function titleInput(t, msgId) {
+  let msg = '';
+  if (BAD_T.test(t.value)) {
+    const pos = t.selectionStart || t.value.length;
+    const before = t.value.slice(0, pos).replace(BAD_TG, '').length;
+    t.value = t.value.replace(BAD_TG, '');
+    try { t.setSelectionRange(before, before); } catch (e) { /* not focused */ }
+    msg = 'Karakter / : \\ tidak bisa dipakai karena dilarang di nama folder Mac.';
+    titleInput.bad = Date.now();
+  }
+  // keep the "not allowed" note on screen a moment after the next keystrokes
+  if (!msg && Date.now() - (titleInput.bad || 0) < 4000) msg = 'Karakter / : \\ tidak bisa dipakai karena dilarang di nama folder Mac.';
+  if (!msg) msg = titleMsg(t.value);
+  if (!msg && t.value.length >= TITLE_MAX) msg = `Maksimal ${TITLE_MAX} karakter.`;
+  const el = document.getElementById(msgId);
+  if (el) { el.innerHTML = msg ? `${ic('warn', 'sm')}${esc(msg)}` : ''; el.hidden = !msg; }
+  return t.value;
+}
 
 /* ------------------------------------------------------------------ routing */
 function parseHash() {
@@ -132,14 +173,21 @@ async function route() {
   stopAudio();
   S.modal = S.modalNext || null; S.modalNext = null; if (!S.modal) S.prevOpen = false;
   const r = parseHash();
-  S.route = r;
+  S.route = r; S.loadErr = null; S.editTitle = false;
+  // an undo belongs to the screen it was made on
+  if (S.toast && S.toast.undo) { S.toast = null; clearTimeout(toast.h); }
   try {
     if (r.name === 'list') { await loadList(); }
     else if (r.name === 'new') { if (!S.s2) await initNew(); }
     else if (r.name === 'settings') { await loadSettings(); }
     else if (r.name === 'meeting') { await openMeeting(r); }
-  } catch (e) { fail(e); }
+  } catch (e) { S.loadErr = e.message || String(e); }
   render();
+}
+// a screen that could not load gets a way out instead of an endless spinner
+function loadingHTML() {
+  if (S.loadErr) return `<div class="loading"><div class="lerr"><span class="glyph bad">${ic('warn', 'lg')}</span><b>Halaman ini belum bisa dibuka</b><span class="muted">${esc(S.loadErr)}</span><div style="display:flex;gap:8px;justify-content:center"><button class="btn" data-go="#/riwayat">${ic('left')}Kembali ke Riwayat</button><button class="btn pri" data-act="reload">Coba lagi</button></div></div></div>`;
+  return '<div class="loading"><span class="spinner lg"></span></div>';
 }
 
 async function loadList() {
@@ -178,12 +226,20 @@ let refreshT = null;
 function onEvent(ev) {
   clearTimeout(refreshT);
   const cur = S.route.name === 'meeting' && S.m && S.m.id === ev.mid;
-  if (ev.kind === 'progress' && cur && S.m) { S.m.progress = ev.progress; patchProgress(); }
+  if (ev.kind === 'progress' && cur && S.m) {
+    const prev = S.m.progress || {};
+    const durs = ev.duration_sec !== undefined && (ev.duration_sec !== S.m.duration_sec || ev.clean_sec !== S.m.clean_sec);
+    S.m.progress = ev.progress;
+    if (ev.duration_sec !== undefined) { S.m.duration_sec = ev.duration_sec; S.m.clean_sec = ev.clean_sec; }
+    if (S.m.status === 'queued') S.m.status = 'transcribing';
+    // the step list (✓ Dekode audio, ✓ Buang hening, ...) only changes with the phase or durations
+    if (S.route.view === 'progres' && (durs || prev.phase !== ev.progress.phase)) render(); else patchProgress();
+  }
   if (ev.kind === 'log' && cur && S.m) { (S.m.log = S.m.log || []).push({ t: fmtClock(new Date()) + ':' + pad(new Date().getSeconds()), text: ev.text }); patchLog(); }
   if (ev.kind === 'suggest' && S.waitSuggest === ev.mid && ev.state !== 'running') {
     S.waitSuggest = null;
-    if (ev.state === 'ready') { toast(`${ev.count} saran Claude siap ditinjau`); if (S.ed) S.ed.stale = true; go(mhash(ev.mid, 'edit')); return; }
-    toast('Saran Claude gagal. Lihat pesan di editor.');
+    if (ev.state === 'ready') { toast(`${ev.count} saran AI siap ditinjau`); if (S.ed) S.ed.stale = true; go(mhash(ev.mid, 'edit')); return; }
+    toast('Saran AI gagal. Lihat pesan di editor.', null, 'bad');
   }
   refreshT = setTimeout(async () => {
     try {
@@ -222,7 +278,7 @@ function pill(status, pct) {
   const m = PILL[status] || PILL.queued;
   return `<span class="pill p-${m[1]}">${m[2] === 1 ? '<span class="spinner" style="width:9px;height:9px;border-width:1.5px"></span>' : ic(m[2], 'sm')}${m[0]}${status === 'transcribing' && pct != null ? ` <span class="mono">${pct}%</span>` : ''}</span>`;
 }
-const claudePill = cs => `<span class="pill p-claude">${ic('spark', 'sm')}Disarankan Claude${cs && cs.accepted ? ` · ${cs.accepted} saran diterima` : ''}</span>`;
+const claudePill = cs => `<span class="pill p-claude">${ic('spark', 'sm')}Disarankan AI${cs && cs.provider ? ` · ${esc(cs.provider)}` : ''}${cs && cs.accepted ? ` · ${cs.accepted} saran diterima` : ''}</span>`;
 const stalePill = () => `<span class="pill p-warn">${ic('warn', 'sm')}Ringkasan usang</span>`;
 const v1Pill = () => '<span class="pill p-neutral">Hasil v1</span>';
 function tb(l, r, back) { return `<header class="tb"><div class="tb-l">${back ? `<button class="iconb" data-go="${back}" aria-label="Kembali">${ic('left')}</button>` : ''}${l}</div><div class="tb-r">${r || ''}</div></header>`; }
@@ -239,7 +295,7 @@ function sidebar() {
   if (cur) {
     const row = S.meetings.find(x => x.id === cur.mid) || (S.m && S.m.id === cur.mid ? S.m : null);
     const p = (row && row.progress) || {};
-    const label = cur.kind === 'transcribe' ? 'Sedang ditranskrip' : cur.kind === 'summary' ? 'Membuat ringkasan' : 'Meminta saran Claude';
+    const label = cur.kind === 'transcribe' ? 'Sedang ditranskrip' : cur.kind === 'summary' ? 'Membuat ringkasan' : 'Meminta saran AI';
     job = `<button class="job" data-go="${mhash(cur.mid, 'auto')}"><span class="t"><span class="spinner" style="width:9px;height:9px;border-width:1.5px;color:var(--accent)"></span>${label}</span><span class="n">${esc(row ? row.title : cur.mid)}</span>${cur.kind === 'transcribe' ? `<div class="bar thin"><i id="sj-bar" style="width:${p.pct || 0}%"></i></div><span class="m">${p.chunks ? `Bagian ${p.chunk} dari ${p.chunks} · ${p.pct || 0}%` : 'Menyiapkan audio'}</span>` : ''}</button>`;
   }
   const pend = st.jobs && st.jobs.pending && st.jobs.pending.length ? `<div class="sfoot" style="margin-top:6px">${ic('clock', 'sm')}<span>${st.jobs.pending.length} antre</span></div>` : '';
@@ -248,7 +304,7 @@ function sidebar() {
   <button class="ni" data-go="#/baru" aria-current="${act === 'new'}">${ic('plus')}Rapat Baru</button>
   <button class="ni" data-go="#/pengaturan" aria-current="${act === 'set'}">${ic('gear')}Pengaturan</button>
   ${job}${pend}
-  <div class="sfoot">${ic('lock', 'sm')}<span>Audio dan transkrip disimpan di Mac ini, di ${esc(homeDir(S.root || (st.output_root || '~/Documents/Meeting Notes')))}</span></div>
+  <div class="sfoot">${ic('lock', 'sm')}<span>Audio dan transkrip disimpan di Mac ini, di ${esc(homeDir(S.root || (st.output_root || '~/Documents/Meeting Report')))}</span></div>
   </aside>`;
 }
 
@@ -279,25 +335,49 @@ async function initNew(file) {
   const s = await api('/api/settings');
   S.settings = s;
   const c = s.config;
-  S.s2 = { file: file || null, title: file ? stem(file.name) : '', lang: c.language || 'id', trim: c.remove_silence !== false,
-    clean: c.save_clean_audio !== false, terms: c.vocabulary || '', parts: [], uploading: null };
+  S.s2 = { file: null, title: '', lang: c.language || 'id', trim: c.remove_silence !== false,
+    clean: c.save_clean_audio !== false, terms: c.vocabulary || '', parts: [], uploading: null, cleanNote: false, titleTouched: false };
+  if (file) s2File(file);
   try { S.recent = (await api('/api/participants/recent')).meetings; } catch (e) { S.recent = []; }
 }
-const stem = n => String(n).replace(/\.[^.]+$/, '');
+const stem = n => String(n).replace(/\.[^.]+$/, '').replace(BAD_TG, '-').trim().slice(0, TITLE_MAX);
+function s2File(f) {
+  const s = S.s2;
+  s.file = f;
+  s.track = f.default_track != null ? f.default_track : null;
+  if (!s.title) s.title = stem(f.name);
+  // "Audio bersih.m4a" from an earlier run: its silences are already cut (Usulan 9)
+  s.cleanNote = /^audio bersih/i.test(f.name);
+  if (s.cleanNote) { s.trim = false; s.clean = false; }
+}
+const fmtSize = b => b >= 1073741824 ? `${(b / 1073741824).toFixed(1).replace('.', ',')} GB` : `${(b / 1048576).toFixed(1).replace('.', ',')} MB`;
+// what Rapat baru knows about the file before Proses (Usulan 15)
+function fileCard(f) {
+  const s = S.s2, pr = f.probe || {}, tr = pr.tracks || [];
+  const head = [pr.video ? 'Video' : 'Audio', fmtSize(f.size)];
+  if (tr.length) head.push(`suara ${esc(String(tr[0].codec).toUpperCase())}${tr.length > 1 ? ` · ${tr.length} jalur suara` : ''}`);
+  if (pr.duration) head.push(fmtDur(pr.duration));
+  const trackSel = tr.length > 1 ? `<div class="frow"><label for="s2-track">Jalur suara</label><select class="pop" id="s2-track" data-ch="s2track">${tr.map(t => `<option value="${t.n}"${s.track === t.n ? ' selected' : ''}>Jalur ${t.n + 1}${t.label ? ` · ${esc(t.label)}` : ''} · ${t.channels === 1 ? 'mono' : t.channels === 2 ? 'stereo' : (t.channels || '?') + ' kanal'} · ${fmtDur(t.duration)}${t.n === f.default_track ? ' (terpanjang)' : ''}</option>`).join('')}<option value="mix"${s.track === 'mix' ? ' selected' : ''}>Gabungkan semua jalur</option></select><span class="muted">Rekaman layar kadang memisahkan suara sistem dan mikrofon. Pilih “Gabungkan” bila suara Anda dan peserta lain ada di jalur berbeda.</span></div>` : '';
+  const prob = pr.ok === false ? `<div class="fmsg">${ic('warn', 'sm')}${esc(pr.problem)}</div>` : '';
+  const disk = f.disk && f.disk.low ? `<div class="fmsg">${ic('warn', 'sm')}Ruang disk tersisa ${fmtSize(f.disk.free)}, perlu sekitar ${fmtSize(f.disk.need)}. Kosongkan sedikit ruang dulu.</div>` : '';
+  const vnote = pr.video && pr.ok !== false ? `<div class="fnote">${ic('info', 'sm')}Hanya suaranya yang dibaca, langsung dari lokasi file. Video tidak disalin atau dipindah.</div>` : '';
+  return `<div class="group filecard"><div class="glyph">${ic(pr.video ? 'cmp' : 'wave', 'lg')}</div><div style="flex:1;min-width:0;display:grid;gap:3px"><div style="font-weight:600">${esc(f.name)}</div><div class="muted" style="font-size:12px">${head.join(' · ')} · ${esc(homeDir(f.path.replace(/\/[^/]+$/, '')))}</div>${prob}${disk}${vnote}${trackSel}</div><button class="btn" data-act="pickFile">Ganti…</button></div>`;
+}
+const fileBlocked = f => !f || (f.probe && f.probe.ok === false) || (f.disk && f.disk.low);
 function S2() {
   const s = S.s2;
-  if (!s) return '<div class="loading"><span class="spinner lg"></span></div>';
+  if (!s) return loadingHTML();
   const f = s.file;
   const fileHTML = s.uploading ? `<div class="group filecard"><div class="glyph">${ic('wave', 'lg')}</div><div style="flex:1;min-width:0"><div style="font-weight:600">${esc(s.uploading.name)}</div><div class="bar thin" style="margin-top:6px"><i style="width:${s.uploading.pct}%"></i></div><div class="muted" style="font-size:12px">Menyalin ke Mac ini… ${s.uploading.pct}%</div></div></div>`
-    : f ? `<div class="group filecard"><div class="glyph">${ic('wave', 'lg')}</div><div style="flex:1;min-width:0"><div style="font-weight:600">${esc(f.name)}</div><div class="muted" style="font-size:12px">${(f.size / 1048576).toFixed(1).replace('.', ',')} MB · ${esc(homeDir(f.path.replace(/\/[^/]+$/, '')))}</div></div><button class="btn" data-act="pickFile">Ganti…</button></div>`
+    : f ? fileCard(f)
     : `<div class="drop" style="max-width:none;padding:26px" data-drop="2"><div class="glyph">${ic('tray', 'lg')}</div><div style="font-weight:600">Tarik file rekaman ke sini</div><div class="muted" style="font-size:12px">m4a, mp3, wav, mp4</div><button class="btn" data-act="pickFile">Pilih File…</button></div>`;
   return tb(ttl('Rapat baru', 'Pilih rekaman, lalu atur cara memprosesnya'), '') +
   `<div class="pane" style="display:flex;flex-direction:column"><div class="form" style="flex:1">
   <div><div class="fgl">Rekaman</div>${fileHTML}</div>
-  <div><div class="fgl">Judul rapat</div><div class="group" style="padding:8px 12px"><input class="field" id="s2-title" style="width:100%;border:0;box-shadow:none;background:transparent;padding:0" placeholder="Misalnya: Rapat Koordinasi Kredit Mikro Q4" value="${esc(s.title)}" data-in="s2title"></div></div>
+  <div><div class="fgl"><label for="s2-title">Judul rapat</label></div><div class="group" style="padding:8px 12px"><input class="field" id="s2-title" maxlength="${TITLE_MAX}" style="width:100%;border:0;box-shadow:none;background:transparent;padding:0" placeholder="Misalnya: Rapat Koordinasi Kredit Mikro Q4" value="${esc(s.title)}" data-in="s2title" aria-describedby="s2-title-msg"></div><div class="fmsg" id="s2-title-msg" role="status"${s.titleTouched && titleMsg(s.title) ? '' : ' hidden'}>${s.titleTouched && titleMsg(s.title) ? ic('warn', 'sm') + esc(titleMsg(s.title)) : ''}</div><div class="fnote">Dipakai juga sebagai nama folder: <span class="mono">tanggal rekaman - judul</span>. Karakter / : \\ tidak bisa dipakai.</div></div>
   <div><div class="fgl">Pengaturan proses</div><div class="group">
    <div class="row"><div class="lb">Bahasa transkrip<small>Dipakai Whisper saat transkripsi</small></div><div class="rv"><select class="pop" id="s2-lang" data-ch="s2lang" aria-label="Bahasa">${Object.entries(LANG).map(([k, v]) => `<option value="${k}"${s.lang === k ? ' selected' : ''}>${v}</option>`).join('')}</select></div></div>
-   <div class="row"><div class="lb">Buang hening<small>Jeda lebih dari ${String((S.settings.config.min_silence_sec || 2)).replace('.', ',')} detik dipotong</small></div><div class="rv">${sw('s2trim', s.trim, 'Buang hening')}</div></div>
+   <div class="row"><div class="lb">Buang hening<small>${s.cleanNote ? 'File ini sudah audio bersih, jadi hening tidak dipotong lagi' : `Jeda lebih dari ${String((S.settings.config.min_silence_sec || 2)).replace('.', ',')} detik dipotong`}</small></div><div class="rv">${sw('s2trim', s.trim, 'Buang hening')}</div></div>
    <div class="row"><div class="lb">Simpan audio bersih<small>Audio bersih.m4a tanpa jeda panjang</small></div><div class="rv">${sw('s2clean', s.clean && s.trim, 'Simpan audio bersih')}</div></div>
   </div></div>
   <div><div class="fgl">Istilah dan nama penting</div><div class="group" style="padding:10px 12px"><textarea class="field" id="s2-terms" rows="2" style="width:100%;border:0;padding:0;box-shadow:none;background:transparent" placeholder="OKR, KPI, Q3, nama produk" data-in="s2terms">${esc(s.terms)}</textarea><div class="muted" style="font-size:11.5px;margin-top:4px">Membantu Whisper mengeja dengan benar dan dipakai untuk saran perbaikan lokal.</div></div></div>
@@ -307,7 +387,7 @@ function S2() {
    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">${S.recent.length ? `<select class="pop" id="s2-from" data-ch="s2from" aria-label="Ambil peserta dari rapat lain"><option value="">Ambil dari rapat lain…</option>${S.recent.map(r => `<option value="${esc(r.id)}">${esc(r.title)} (${r.participants.length} peserta)</option>`).join('')}</select>` : ''}<span class="muted" style="font-size:11.5px">Urutan menentukan tombol 1–9 di editor. Bisa diubah nanti.</span></div>
   </div></div>
   </div>
-  <div class="footbar"><div class="priv">${ic('lock')}Audio diproses di Mac ini dan tidak dikirim ke mana pun.</div><button class="btn pri lg" data-act="process"${f && !s.uploading ? '' : ' disabled'}>Proses</button></div></div>`;
+  <div class="footbar"><div class="priv">${ic('lock')}Audio diproses di Mac ini dan tidak dikirim ke mana pun.</div><button class="btn pri lg" data-act="process"${!fileBlocked(f) && !s.uploading && !titleMsg(s.title) ? '' : ' disabled'}>Proses</button></div></div>`;
 }
 async function uploadFile(file) {
   if (!S.s2) await initNew();
@@ -320,11 +400,11 @@ async function uploadFile(file) {
   xhr.onload = () => {
     let d = null; try { d = JSON.parse(xhr.responseText); } catch (e) { /* bad json */ }
     S.s2.uploading = null;
-    if (xhr.status === 200 && d) { S.s2.file = d; if (!S.s2.title) S.s2.title = stem(d.name); }
-    else toast((d && d.detail) || 'File gagal disalin');
+    if (xhr.status === 200 && d) s2File(d);
+    else toast((d && d.detail) || 'File gagal disalin', null, 'bad');
     render();
   };
-  xhr.onerror = () => { S.s2.uploading = null; toast('File gagal disalin'); render(); };
+  xhr.onerror = () => { S.s2.uploading = null; toast('File gagal disalin', null, 'bad'); render(); };
   xhr.send(file);
 }
 
@@ -374,35 +454,68 @@ function S3b() {
 
 /* ------------------------------------------------------------------ editor (S4 / S4b) */
 const canon = (segs, parts) => JSON.stringify({
-  s: segs.map(s => [s.id, +(+s.start).toFixed(2), +(+s.end).toFixed(2), (s.text || '').trim(), s.speaker_id || null, !!s.secret]),
+  s: segs.map(s => [s.id, +(+s.start).toFixed(2), +(+s.end).toFixed(2), (s.text || '').trim(), s.speaker_id || null, !!s.secret, !!s.manual]),
   p: parts.map(p => [p.id, (p.name || '').trim(), (p.role || '').trim()])
 });
+const segOf = (s, gf) => ({ id: s.id, start: s.start, end: s.end, text: s.text, speaker_id: s.speaker_id || null, secret: !!s.secret,
+  ...(s.manual ? { manual: true } : {}), ...(s.gap_fill || (gf && gf.has(s.id)) ? { gap_fill: true } : {}) });
 async function loadEditor(view) {
   const m = S.m;
   const d = await api(`/api/meetings/${encodeURIComponent(m.id)}/editor`);
   const src = d.draft || d.base;
-  const segs = src.segments.map(s => ({ id: s.id, start: s.start, end: s.end, text: s.text, speaker_id: s.speaker_id || null, secret: !!s.secret }));
+  const gf = new Set(d.gap_fill || []);
+  const segs = src.segments.map(s => segOf(s, gf));
   const parts = clone(src.participants || []);
   const orig = {};
   d.base.segments.forEach(s => { orig[s.id] = s.text; });
   const sugs = [];
-  d.local.forEach(x => sugs.push({ ...x, st: 'open' }));
+  // a local hint without a replacement word is not a suggestion: it shows only under "Tandai kata ragu"
+  d.local.forEach(x => { if (x.to) sugs.push({ ...x, st: 'open' }); });
   d.claude.forEach(x => sugs.push({ ...x, st: 'open' }));
   S.ed = {
     mid: m.id, mode: view === 'tinjau' || !m.transcript_rev ? 'review' : 'edit',
-    base: d.base, baseKey: canon(d.base.segments, d.base.participants || []),
+    base: d.base, baseKey: canon(d.base.segments.map(s => segOf(s)), d.base.participants || []),
     segs, parts, orig, sugs, low: d.low_words || {}, claudeTotal: d.claude.length,
     draftAt: d.draft ? d.draft.updated : null, fromDraft: !!d.draft, savedAt: null,
-    sel: 0, play: -1, find: '', repl: '', ren: -1, reverted: {}, stale: false,
+    sel: 0, play: -1, find: '', repl: '', hit: 0, onlyHits: false, doubt: false, autoNext: false,
+    qp: null, ren: -1, stale: false, regions: null, minGap: 3, gapSkip: {}, cursor: null, flash: null,
   };
+  loadGaps(m.id);
 }
-const edDirty = e => canon(e.segs, e.parts) !== e.baseKey;
+async function loadGaps(mid) {
+  try {
+    const g = await api(`/api/meetings/${encodeURIComponent(mid)}/gaps`);
+    if (S.ed && S.ed.mid === mid && g.regions) { S.ed.regions = g.regions; S.ed.minGap = g.min_gap || 3; if (['tinjau', 'edit'].includes(S.route.view)) render(); }
+  } catch (e) { /* gaps are only a hint */ }
+}
+// stretches where the recording has speech but no segment covers it (Usulan 3)
+function edGaps(e) {
+  if (!e.regions || !e.regions.length) return [];
+  const segs = e.segs.slice().sort((a, b) => a.start - b.start);
+  const cov = [];
+  segs.forEach(s => { const l = cov[cov.length - 1]; if (l && s.start <= l[1] + 0.05) l[1] = Math.max(l[1], s.end); else cov.push([s.start, s.end]); });
+  const out = []; let j = 0;
+  e.regions.forEach(([a, b]) => {
+    while (j < cov.length && cov[j][1] <= a) j++;
+    let cur = a;
+    for (let k = j; k < cov.length && cov[k][0] < b; k++) {
+      if (cov[k][0] - cur > e.minGap) out.push([cur, cov[k][0]]);
+      cur = Math.max(cur, cov[k][1]);
+    }
+    if (b - cur > e.minGap) out.push([cur, b]);
+  });
+  return out.filter(g => !e.gapSkip[g[0].toFixed(1)]);
+}
+const edDirty = e => canon(cleanSegs(e.segs), e.parts) !== e.baseKey;
+// an inserted segment that was never typed into is not content
+const cleanSegs = segs => segs.filter(s => !(s.manual && !(s.text || '').trim()));
 function edChanges(e) {
   const base = {}; e.base.segments.forEach(s => { base[s.id] = s; });
   const bp = {}; (e.base.participants || []).forEach(p => { bp[p.id] = p; });
   let edited = 0, tagged = 0, secret = 0, merged = 0;
-  const ids = new Set(e.segs.map(s => s.id));
-  e.segs.forEach(s => {
+  const segs = cleanSegs(e.segs);
+  const ids = new Set(segs.map(s => s.id));
+  segs.forEach(s => {
     const b = base[s.id];
     if (!b) { merged++; return; }
     if ((b.text || '').trim() !== (s.text || '').trim()) edited++;
@@ -413,62 +526,106 @@ function edChanges(e) {
   const added = e.parts.filter(p => !bp[p.id]).map(p => p.name);
   const renamed = e.parts.filter(p => bp[p.id] && (bp[p.id].name !== p.name || (bp[p.id].role || '') !== (p.role || ''))).map(p => p.name);
   const removed = Object.values(bp).filter(p => !e.parts.find(x => x.id === p.id)).map(p => p.name);
-  return { edited, tagged, secret, merged, added, renamed, removed, n: edited + tagged + secret + merged + added.length + renamed.length + removed.length };
+  const order = (e.base.participants || []).map(p => p.id).join() !== e.parts.filter(p => bp[p.id]).map(p => p.id).join() && !added.length && !removed.length ? 1 : 0;
+  return { edited, tagged, secret, merged, added, renamed, removed, order, n: edited + tagged + secret + merged + added.length + renamed.length + removed.length + order };
 }
 function changeList(c) {
   const li = [];
   if (c.added && c.added.length) li.push(`${c.added.length} peserta ditambah: ${c.added.map(esc).join(', ')}`);
   if (c.renamed && c.renamed.length) li.push(`${c.renamed.length} nama peserta diubah`);
   if (c.removed && c.removed.length) li.push(`${c.removed.length} peserta dihapus`);
+  if (c.order) li.push('Urutan peserta diubah');
   if (c.tagged) li.push(`${num(c.tagged)} segmen diberi tanda peserta`);
   if (c.edited) li.push(`${num(c.edited)} segmen teksnya diedit`);
-  if (c.merged) li.push(`${num(c.merged)} segmen digabung atau dipecah`);
+  if (c.merged) li.push(`${num(c.merged)} segmen digabung, dipecah, dihapus, atau ditambah`);
   if (c.secret) li.push(`${num(c.secret)} tanda rahasia diubah`);
   return li;
 }
 function visibleSugs(e, seg) {
-  return e.sugs.map((s, j) => ({ s, j })).filter(x => x.s.seg_id === seg.id && x.s.st === 'open' && seg.text.includes(x.s.from));
+  return e.sugs.map((s, j) => ({ s, j })).filter(x => x.s.seg_id === seg.id && x.s.st === 'open' && x.s.to && (seg.text || '').includes(x.s.from));
 }
-function hlText(e, seg) {
-  let h = esc(seg.text);
-  visibleSugs(e, seg).forEach(({ s }) => {
-    const f = esc(s.from);
-    const i = h.indexOf(f);
-    if (i >= 0) h = h.slice(0, i) + `<mark class="${s.kind === 'claude' ? 'cl' : ''}">${f}</mark>` + h.slice(i + f.length);
-  });
-  if (e.find) {
-    // highlight search hits outside existing tags
-    const q = e.find.toLowerCase();
-    h = h.replace(/(^|>)([^<]+)/g, (all, a, txt) => {
-      let out = '', rest = txt, low;
-      while ((low = rest.toLowerCase().indexOf(esc(q).toLowerCase())) >= 0) {
-        const len = esc(q).length;
-        out += rest.slice(0, low) + `<mark>${rest.slice(low, low + len)}</mark>`;
-        rest = rest.slice(low + len);
-      }
-      return a + out + rest;
-    });
+function doubtWords(e, seg) {
+  const t = seg.text || '';
+  return (e.low[seg.id] || []).filter(w => new RegExp(`(^|[^\\p{L}\\p{N}])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\p{L}\\p{N}])`, 'iu').test(t));
+}
+function doubtCount(e) { return e.segs.reduce((a, g) => a + doubtWords(e, g).length, 0); }
+function findHits(e) {
+  if (!e.find) return [];
+  const q = e.find.toLowerCase(), out = [];
+  e.segs.forEach((g, i) => { const t = (g.text || '').toLowerCase(); let p = t.indexOf(q); while (p >= 0) { out.push({ i, p }); p = t.indexOf(q, p + q.length); } });
+  return out;
+}
+// marks are built on the raw text per character, so search, suggestions and doubt words can overlap safely
+function hlText(e, seg, i, X) {
+  const t = seg.text || '';
+  if (!t) return '';
+  const f = new Array(t.length).fill('');
+  const add = (a, len, c) => { for (let k = a; k < a + len && k < t.length; k++) if (!f[k].includes(c)) f[k] += ' ' + c; };
+  visibleSugs(e, seg).forEach(({ s }) => { const p = t.indexOf(s.from); if (p >= 0) add(p, s.from.length, s.kind === 'claude' ? 'cl' : 'sl'); });
+  if (e.doubt) doubtWords(e, seg).forEach(w => { const m = new RegExp(`(^|[^\\p{L}\\p{N}])(${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})($|[^\\p{L}\\p{N}])`, 'iu').exec(t); if (m) add(m.index + m[1].length, m[2].length, 'rg'); });
+  if (e.find && X) {
+    const n = e.find.length;
+    X.hits.forEach((h, k) => { if (h.i === i) add(h.p, n, k === X.cur ? 'fh cur' : 'fh'); });
   }
-  return h;
+  let out = '', run = '', cls = null;
+  const flush = () => { if (!run) return; out += cls ? `<mark class="${cls.trim()}">${esc(run)}</mark>` : esc(run); run = ''; };
+  for (let k = 0; k < t.length; k++) { if (f[k] !== cls) { flush(); cls = f[k]; } run += t[k]; }
+  flush();
+  return out;
 }
 function partCount(e, pid) { return e.segs.filter(s => s.speaker_id === pid).length; }
 function unassigned(e) { const ids = new Set(e.parts.map(p => p.id)); return e.segs.filter(s => !ids.has(s.speaker_id)).length; }
-function findCount(e) { if (!e.find) return 0; const q = e.find.toLowerCase(); return e.segs.reduce((a, s) => a + (s.text.toLowerCase().split(q).length - 1), 0); }
+function edCtx(e) {
+  const hits = findHits(e);
+  if (e.hit >= hits.length) e.hit = hits.length ? hits.length - 1 : 0;
+  return { hits, cur: hits.length ? e.hit : -1, audio: !!(S.m.audio && S.m.audio.asli) };
+}
+function segRow(e, g, i, X) {
+  const on = i === e.sel;
+  const changed = e.orig[g.id] != null && e.orig[g.id] !== g.text;
+  const pOpts = `<option value=""${!g.speaker_id ? ' selected' : ''}>Belum ditandai</option>` + e.parts.map((p, k) => `<option value="${esc(p.id)}"${g.speaker_id === p.id ? ' selected' : ''}>${k < 9 ? (k + 1) + ' · ' : ''}${esc(p.name)}</option>`).join('');
+  const flash = e.flash && e.flash.i === i;
+  const pills = `${g.manual ? `<span class="pill p-neutral mini">${ic('ins', 'sm')}Manual</span>` : ''}${g.gap_fill ? `<span class="pill p-info mini">${ic('wave', 'sm')}Dari celah, periksa</span>` : ''}`;
+  return `<div class="sg${on ? ' on' : ''}" data-act="selSeg" data-i="${i}" id="sg-${i}"><button class="ts" data-act="playSeg" data-i="${i}" title="Putar dari ${fmtTs(g.start)}">${fmtTs(g.start)}</button><select class="pop spk${g.speaker_id ? '' : ' none'}${flash ? ' flash' : ''}" data-ch="spk" data-i="${i}" aria-label="Peserta segmen ${fmtTs(g.start)}"${e.parts.length ? '' : ' disabled'}>${pOpts}</select><div class="stext" contenteditable="plaintext-only" spellcheck="false" data-ed="${i}" data-ph="Ketik isi segmen…">${hlText(e, g, i, X)}</div><div class="acts">${changed ? `<button class="iconb" data-act="revSeg" data-i="${i}" title="Kembalikan teks sebelum diedit" aria-label="Kembalikan teks">${ic('revert')}</button>` : ''}<button class="iconb" data-act="playSeg" data-i="${i}" title="Putar potongan ini saja" aria-label="Putar potongan"${X.audio ? '' : ' disabled'}>${e.play === i ? '<span class="eq"><i></i><i></i><i></i></span>' : ic('play')}</button><button class="iconb del" data-act="delSeg" data-i="${i}" title="Hapus segmen (⌫)" aria-label="Hapus segmen ${fmtTs(g.start)}">${ic('trash')}</button></div>
+    ${pills ? `<div class="meta2">${pills}</div>` : ''}
+    ${on && e.parts.length ? `<div class="hint">${ic('person', 'sm')}<span>Tekan ${e.parts.slice(0, 9).map((p, j) => `<kbd>${j + 1}</kbd>`).join(' ')} untuk menandai, <kbd>0</kbd> hapus tanda${e.parts.length > 9 ? ', <kbd>P</kbd> cari nama' : ', <kbd>P</kbd> pilih nama'}</span><span class="tagmsg" id="tagmsg" role="status">${flash ? `${ic('check', 'sm')}${esc(e.flash.text)}` : ''}</span></div>` : ''}
+    ${g.secret ? `<div class="secret"><span class="pill p-neutral">${ic('lock', 'sm')}Rahasia · tidak dikirim ke layanan AI</span><button class="btn ghost" style="height:20px;font-size:11px" data-act="secret" data-i="${i}">Hapus tanda</button></div>` : ''}
+    ${visibleSugs(e, g).map(({ s, j }) => `<div class="sgg${s.kind === 'claude' ? ' cl' : ''}"><span class="src ${s.kind === 'claude' ? 'c' : 'l'}">${ic(s.kind === 'claude' ? 'spark' : 'pencil', 'sm')}${s.kind === 'claude' ? 'Saran AI' : 'Saran lokal'}</span><span class="grow"><s>${esc(s.from)}</s> menjadi <b>${esc(s.to)}</b> <span class="muted">· ${esc(s.reason)}</span></span><button class="btn" data-act="sugOk" data-j="${j}">Terima</button><button class="btn ghost" data-act="sugNo" data-j="${j}">Tolak</button>${s.kind === 'local' ? `<button class="btn ghost" data-act="sugTerm" data-j="${j}">Tambah ke istilah</button>` : ''}</div>`).join('')}
+    </div>`;
+}
+function gapRow(g, k, X) {
+  const [a, b] = g;
+  const busy = S.gapBusy === a.toFixed(1);
+  return `<div class="gaprow" id="gap-${k}"><span class="gi">${ic('warn', 'sm')}</span><span class="grow"><b>Celah ${fmtTs(a)}–${fmtTs(b)}</b> · ${Math.round(b - a)} detik ada suara tetapi belum ada transkrip</span>${X.audio ? `<button class="btn" data-act="gapPlay" data-a="${a}" data-b="${b}">${ic('play', 'sm')}Putar</button><button class="btn" data-act="gapRe" data-a="${a}" data-b="${b}"${S.gapBusy ? ' disabled' : ''}>${busy ? '<span class="spinner" style="width:10px;height:10px"></span>' : ic('wave', 'sm')}Transkrip ulang bagian ini</button>` : ''}<button class="btn ghost" data-act="gapIns" data-a="${a}" data-b="${b}">${ic('ins', 'sm')}Sisipkan manual</button><button class="btn ghost" data-act="gapSkip" data-a="${a}" title="Sembunyikan sampai editor dibuka lagi">Abaikan</button></div>`;
+}
+function qpHTML(e) {
+  if (!e.qp) return '';
+  const list = qpList(e);
+  if (e.qp.k >= list.length) e.qp.k = Math.max(0, list.length - 1);
+  const g = e.segs[e.sel];
+  return `<div class="qp" role="dialog" aria-label="Pilih peserta untuk segmen ${g ? fmtTs(g.start) : ''}"><div class="qph">${ic('person', 'sm')}Tandai segmen ${g ? fmtTs(g.start) : ''}</div><input class="field" id="qp-in" placeholder="Ketik nama peserta…" value="${esc(e.qp.q)}" data-in="qp" autocomplete="off" aria-label="Cari nama peserta"><div class="qpl" role="listbox">${list.map((p, k) => `<button class="qpi${k === e.qp.k ? ' on' : ''}" role="option" aria-selected="${k === e.qp.k}" data-act="qpPick" data-id="${esc(p.id)}"><kbd>${p.n <= 9 ? p.n : '·'}</kbd><span class="grow">${esc(p.name)}${p.role ? ` <span class="role">${esc(p.role)}</span>` : ''}</span></button>`).join('') || '<div class="muted" style="padding:8px;font-size:12px">Tidak ada nama yang cocok</div>'}</div><div class="muted" style="font-size:11px"><kbd>↑</kbd><kbd>↓</kbd> pilih · <kbd>Enter</kbd> tandai · <kbd>Esc</kbd> tutup</div></div>`;
+}
+const qpList = e => e.parts.map((p, i) => ({ ...p, n: i + 1 })).filter(p => !e.qp.q || `${p.name} ${p.role || ''}`.toLowerCase().includes(e.qp.q.toLowerCase()));
+function scrubHTML(kind, pos, len, id) {
+  const pct = len ? Math.min(100, pos / len * 100).toFixed(2) : 0;
+  return `<div class="aprog scrub" data-scrub="${kind}" data-len="${len || 0}" tabindex="0" role="slider" aria-label="Posisi audio" aria-valuemin="0" aria-valuemax="${Math.round(len || 0)}" aria-valuenow="${Math.round(pos)}" aria-valuetext="${fmtDur(pos)}" title="Seret untuk menggeser · ← → 5 detik, Shift 30 detik"><i id="${id}" style="width:${pct}%"></i><span class="tip" hidden></span></div>`;
+}
 
 function editorHTML() {
   const e = S.ed, m = S.m;
-  if (!e) return '<div class="loading"><span class="spinner lg"></span></div>';
+  if (!e) return loadingHTML();
   if (S.waitSuggest === m.id) {
-    return tb(ttl('Saran Claude', esc(m.title)), '') + `<div class="pane" style="display:flex"><div class="center"><div class="s5"><span class="spinner lg" style="color:var(--claude)"></span><h2>Meminta saran dari Claude…</h2><p>Teks sudah difilter di Mac ini. Saran akan tampil di editor dan tidak ada yang diterapkan sebelum Anda klik Terima.</p></div></div></div>`;
+    return tb(ttl('Saran AI', esc(m.title)), '') + `<div class="pane" style="display:flex"><div class="center"><div class="s5"><span class="spinner lg" style="color:var(--claude)"></span><h2>Meminta saran dari ${esc(AI().provider_short)}…</h2><p>Teks sudah difilter di Mac ini. Saran akan tampil di editor dan tidak ada yang diterapkan sebelum Anda klik Terima.</p></div></div></div>`;
   }
+  const X = edCtx(e);
   const isB = e.mode === 'edit';
   const dirty = edDirty(e);
   const nChg = dirty ? edChanges(e).n : 0;
-  const open = e.sugs.filter(s => s.st === 'open' && (S.ed.segs.find(g => g.id === s.seg_id) || { text: '' }).text.includes(s.from));
+  const open = e.sugs.filter(s => s.st === 'open' && s.to && (e.segs.find(g => g.id === s.seg_id) || { text: '' }).text.includes(s.from));
   const loc = open.filter(s => s.kind === 'local').length, cl = open.filter(s => s.kind === 'claude').length;
-  const fc = findCount(e);
-  const selSeg = e.segs[e.sel] || e.segs[0];
-  const playSeg = e.play >= 0 ? e.segs[e.play] : selSeg;
+  const nDoubt = doubtCount(e);
+  const nh = X.hits.length;
+  const selSegO = e.segs[e.sel] || e.segs[0];
   const sm = m.summaries && m.summaries.length ? m.summaries[m.summaries.length - 1] : null;
   const claudeReview = e.claudeTotal > 0;
   const saveLabel = !dirty && claudeReview ? 'Selesai meninjau saran' : 'Simpan';
@@ -477,32 +634,40 @@ function editorHTML() {
     : ttl('Tinjau transkrip', `${esc(m.title)} · draf · ${num(e.segs.length)} segmen · ±${num(words(e.segs))} kata`);
   const status = isB ? `<span class="cnt muted" style="font-size:12px" id="chg-lbl">${dirty ? `${num(nChg)} perubahan belum disimpan` : 'Tidak ada perubahan'}</span>`
     : `<span class="muted" style="font-size:12px;display:inline-flex;gap:5px;align-items:center" id="chg-lbl">${e.savedAt ? `${ic('check', 'sm')}Draf tersimpan ${e.savedAt}` : 'Belum disimpan'}</span>`;
-  const right = `${status}<button class="btn" data-act="openDiff">${ic('cmp')}${isB ? 'Bandingkan versi' : 'Asli vs editan'}</button><button class="btn" data-act="closeEd">Tutup</button><button class="btn pri" data-act="save" id="save-btn"${saveDisabled ? ' disabled' : ''}>${saveLabel}</button>`;
-  const pOpts = s => `<option value=""${!s.speaker_id ? ' selected' : ''}>Belum ditandai</option>` + e.parts.map((p, i) => `<option value="${esc(p.id)}"${s.speaker_id === p.id ? ' selected' : ''}>${i < 9 ? (i + 1) + ' · ' : ''}${esc(p.name)}</option>`).join('');
+  const right = `${status}<button class="btn" data-act="openDiff">${ic('cmp')}${isB ? 'Bandingkan versi' : 'Asli vs editan'}</button><button class="btn" data-act="closeEd" title="Editan tetap tersimpan sebagai draf">Tutup</button><button class="btn pri" data-act="save" id="save-btn"${saveDisabled ? ' disabled' : ''}>${saveLabel}</button>`;
   const un = unassigned(e);
   const total = e.segs.length;
   const draftBanner = e.fromDraft ? `<div class="banner info" style="margin:8px 14px 0">${ic('info')}<span class="grow">Melanjutkan draf yang belum disimpan${e.draftAt ? ` (terakhir ${fmtDT(e.draftAt)})` : ''}.</span><button class="btn ghost" data-act="dropDraft">Buang draf</button></div>` : '';
-  const sugFail = m.suggest_job && m.suggest_job.state === 'failed' ? `<div class="banner bad" style="margin:8px 14px 0">${ic('warn')}<span class="grow">Saran Claude gagal: ${esc(m.suggest_job.error || '')}</span></div>` : '';
-  const hasAudio = m.audio && m.audio.asli;
-  return tb(head, right, mhash(m.id, isB ? 'transkrip' : 'transkrip')) +
+  const sugFail = m.suggest_job && m.suggest_job.state === 'failed' ? `<div class="banner bad" style="margin:8px 14px 0">${ic('warn')}<span class="grow">Saran AI gagal: ${esc(m.suggest_job.error || '')}</span></div>` : '';
+  const gaps = edGaps(e);
+  const gapBanner = gaps.length ? `<div class="banner warn" style="margin:8px 14px 0">${ic('warn')}<span class="grow"><b>${gaps.length} bagian rekaman berisi suara tetapi tidak ada transkripnya</b> (lebih dari ${String(e.minGap).replace('.', ',')} detik). Whisper kadang melompati bagian. Dengarkan, lalu transkrip ulang atau sisipkan manual.</span><button class="btn" data-act="gapNext">${ic('down')}Lompat ke celah</button></div>` : '';
+  // gap rows sit before the first segment that starts after the gap
+  const gapAt = {};
+  gaps.forEach((g, k) => { let pos = e.segs.findIndex(s => s.start >= g[1] - 0.05); if (pos < 0) pos = e.segs.length; (gapAt[pos] = gapAt[pos] || []).push(gapRow(g, k, X)); });
+  const hitRows = e.onlyHits && e.find ? new Set(X.hits.map(h => h.i)) : null;
+  let list = '';
+  e.segs.forEach((g, i) => {
+    if (!hitRows && gapAt[i]) list += gapAt[i].join('');
+    if (hitRows && !hitRows.has(i)) return;
+    list += segRow(e, g, i, X);
+  });
+  if (!hitRows && gapAt[e.segs.length]) list += gapAt[e.segs.length].join('');
+  if (hitRows && !hitRows.size) list = `<div class="muted" style="padding:24px 16px">Tidak ada segmen yang memuat “${esc(e.find)}”.</div>`;
+  const cursor = e.cursor != null ? e.cursor : (selSegO ? selSegO.start : 0);
+  const len = m.duration_sec || 0;
+  return tb(head, right, mhash(m.id, 'transkrip')) +
   `<div class="ed"><div class="ed-main">
-  <div class="ebar"><label class="srch"><span class="sr">Cari</span>${ic('search')}<input class="field" id="ed-find" style="width:130px" placeholder="Cari" value="${esc(e.find)}" data-in="find"></label><input class="field" id="ed-repl" style="width:120px" placeholder="Ganti dengan" value="${esc(e.repl)}" data-in="repl"><button class="btn" data-act="replAll" id="repl-btn"${fc ? '' : ' disabled'}>Ganti semua${fc ? ` (${fc})` : ''}</button><span class="sepv"></span><button class="btn ghost" data-act="merge" title="Gabung dengan segmen berikutnya">${ic('merge')}Gabung</button><button class="btn ghost" data-act="split" title="Pecah segmen di posisi kursor">${ic('split')}Pecah</button><button class="btn ghost" data-act="secret" data-i="${e.sel}" title="Tandai segmen ini rahasia (tidak dikirim ke Claude)">${ic('lock')}${selSeg && selSeg.secret ? 'Hapus rahasia' : 'Rahasia'}</button></div>
-  <div class="ebar" style="background:var(--panel)"><span class="pill p-warn">${ic('pencil', 'sm')}${loc} saran lokal</span>${cl ? `<span class="pill p-claude">${ic('spark', 'sm')}${cl} saran Claude</span>` : ''}<button class="btn" data-act="acceptAll"${open.some(s => s.to) ? '' : ' disabled'}>Terima semua</button><button class="btn ghost" data-act="rejectAll"${loc + cl ? '' : ' disabled'}>Tolak semua</button><span style="flex:1"></span>${m.claude_suggest ? claudePill(m.claude_suggest) : ''}${isB ? '' : ''}${!claudeReview && isB && m.transcript_rev ? `<button class="btn claude" data-act="openM1">${ic('spark')}Minta saran Claude</button>` : ''}</div>
-  ${draftBanner}${sugFail}
-  <div class="player"><button class="pbtn" data-act="playSeg" data-i="${e.play >= 0 ? e.play : e.sel}" aria-label="${e.play >= 0 ? 'Jeda' : 'Putar'}"${hasAudio ? '' : ' disabled'}>${ic(e.play >= 0 ? 'pause' : 'play')}</button><span class="mono" style="font-size:12px" id="pl-ts">${fmtTs(playSeg ? playSeg.start : 0)}</span><div class="bar thin"><i id="pl-bar" style="width:${m.duration_sec && playSeg ? (playSeg.start / m.duration_sec * 100).toFixed(1) : 0}%"></i></div><span class="mono muted" style="font-size:12px">${fmtDur(m.duration_sec)}</span><span class="muted" style="font-size:12px">${hasAudio ? 'Rekaman asli' : 'Rekaman asli tidak ditemukan'}</span></div>
-  <div class="seglist" data-keep="seglist" id="seglist">${e.segs.map((g, i) => {
-    const on = i === e.sel;
-    const changed = e.orig[g.id] != null && e.orig[g.id] !== g.text;
-    return `<div class="sg${on ? ' on' : ''}" data-act="selSeg" data-i="${i}" id="sg-${i}"><button class="ts" data-act="playSeg" data-i="${i}" title="Putar dari ${fmtTs(g.start)}">${fmtTs(g.start)}</button><select class="pop spk${g.speaker_id ? '' : ' none'}" data-ch="spk" data-i="${i}" aria-label="Peserta segmen ${fmtTs(g.start)}"${e.parts.length ? '' : ' disabled'}>${pOpts(g)}</select><div class="stext" contenteditable="plaintext-only" spellcheck="false" data-ed="${i}">${hlText(e, g)}</div><div class="acts">${changed ? `<button class="iconb" data-act="revSeg" data-i="${i}" title="Kembalikan teks sebelum diedit" aria-label="Kembalikan teks">${ic('revert')}</button>` : ''}<button class="iconb" data-act="playSeg" data-i="${i}" title="Putar potongan ini saja" aria-label="Putar potongan"${hasAudio ? '' : ' disabled'}>${e.play === i ? '<span class="eq"><i></i><i></i><i></i></span>' : ic('play')}</button></div>
-    ${on && e.parts.length ? `<div class="hint">${ic('person', 'sm')}Dipilih · tekan ${e.parts.slice(0, 9).map((p, j) => `<kbd>${j + 1}</kbd>`).join(' ')} untuk menandai, <kbd>0</kbd> hapus tanda</div>` : ''}
-    ${g.secret ? `<div class="secret"><span class="pill p-neutral">${ic('lock', 'sm')}Rahasia · tidak dikirim ke Claude</span><button class="btn ghost" style="height:20px;font-size:11px" data-act="secret" data-i="${i}">Hapus tanda</button></div>` : ''}
-    ${visibleSugs(e, g).map(({ s, j }) => `<div class="sgg${s.kind === 'claude' ? ' cl' : ''}"><span class="src ${s.kind === 'claude' ? 'c' : 'l'}">${ic(s.kind === 'claude' ? 'spark' : 'pencil', 'sm')}${s.kind === 'claude' ? 'Saran Claude' : 'Saran lokal'}</span><span class="grow">${s.to ? `<s>${esc(s.from)}</s> menjadi <b>${esc(s.to)}</b>` : `<b>${esc(s.from)}</b>`} <span class="muted">· ${esc(s.reason)}</span></span>${s.to ? `<button class="btn" data-act="sugOk" data-j="${j}">Terima</button><button class="btn ghost" data-act="sugNo" data-j="${j}">Tolak</button>` : `<button class="btn" data-act="playSeg" data-i="${i}">${ic('play', 'sm')}Dengarkan</button><button class="btn ghost" data-act="sugNo" data-j="${j}">Abaikan</button>`}${s.kind === 'local' && s.to ? `<button class="btn ghost" data-act="sugTerm" data-j="${j}">Tambah ke istilah</button>` : ''}</div>`).join('')}
-    </div>`;
-  }).join('')}</div></div>
-  <aside class="eside"><h3>Peserta <span class="muted" style="font-weight:400">segmen</span></h3><div class="plist">${e.parts.map((p, i) => `<div class="prow"><kbd>${i < 9 ? i + 1 : '·'}</kbd>${e.ren === i ? `<input class="field" id="ren-${i}" value="${esc(p.name)}${p.role ? ', ' + esc(p.role) : ''}" data-enter="renOk" data-i="${i}" aria-label="Nama, jabatan">` : `<span class="nm" title="${esc(p.role || '')}">${esc(p.name)}${e.base.participants && e.base.participants.find(x => x.id === p.id) ? '' : '<span class="new">baru</span>'}${p.role ? `<span class="role">${esc(p.role)}</span>` : ''}</span>`}<button class="iconb" style="width:22px;height:22px" data-act="ren" data-i="${i}" aria-label="Ubah nama ${esc(p.name)}">${ic('pencil', 'sm')}</button><span class="nb">${num(partCount(e, p.id))}</span></div>`).join('') || '<span class="muted" style="font-size:12px">Belum ada peserta. Tambahkan supaya bisa menandai suara.</span>'}</div>
+  <div class="ebar"><label class="srch"><span class="sr">Cari</span>${ic('search')}<input class="field" id="ed-find" style="width:150px" placeholder="Cari (⌘F)" value="${esc(e.find)}" data-in="find" aria-describedby="find-cnt"></label><span class="fcount" id="find-cnt" aria-live="polite">${e.find ? (nh ? `${X.cur + 1} dari ${num(nh)}` : 'Tidak ada') : ''}</span><button class="iconb" data-act="findNav" data-v="-1" aria-label="Hasil sebelumnya (Shift+Enter)" title="Sebelumnya (Shift+Enter)"${nh ? '' : ' disabled'}>${ic('up')}</button><button class="iconb" data-act="findNav" data-v="1" aria-label="Hasil berikutnya (Enter)" title="Berikutnya (Enter)"${nh ? '' : ' disabled'}>${ic('down')}</button><label class="chk" title="Sembunyikan segmen yang tidak memuat kata ini"><input type="checkbox" data-ch="onlyHits"${e.onlyHits ? ' checked' : ''}${e.find ? '' : ' disabled'}>Hanya baris cocok</label><input class="field" id="ed-repl" style="width:120px" placeholder="Ganti dengan" value="${esc(e.repl)}" data-in="repl" aria-label="Ganti dengan"><button class="btn" data-act="replOne" id="repl1-btn"${nh ? '' : ' disabled'}>Ganti</button><button class="btn" data-act="replAll" id="repl-btn"${nh ? '' : ' disabled'}>Ganti semua${nh ? ` (${nh})` : ''}</button></div>
+  <div class="ebar"><button class="btn ghost" data-act="merge" title="Satukan segmen terpilih dengan segmen tepat di bawahnya">${ic('merge')}Gabung dengan bawah</button><button class="btn ghost" data-act="split" title="Klik di dalam teks dulu, lalu pecah di posisi kursor">${ic('split')}Pecah di kursor</button><button class="btn ghost" data-act="insSeg" title="Sisipkan segmen kosong di bawah segmen terpilih">${ic('ins')}Sisipkan segmen</button><button class="btn ghost" data-act="delSeg" title="Hapus segmen terpilih (⌫)">${ic('trash')}Hapus</button><span class="sepv"></span><button class="btn ghost" data-act="secret" id="sec-btn" title="Tandai segmen ini rahasia (tidak dikirim ke layanan AI)">${ic('lock')}${selSegO && selSegO.secret ? 'Hapus rahasia' : 'Rahasia'}</button></div>
+  <div class="ebar" style="background:var(--panel)"><span class="pill p-warn">${ic('pencil', 'sm')}${loc} saran lokal</span>${cl ? `<span class="pill p-claude">${ic('spark', 'sm')}${cl} saran AI</span>` : ''}<button class="btn" data-act="acceptAll"${open.length ? '' : ' disabled'}>Terima semua</button><button class="btn ghost" data-act="rejectAll"${open.length ? '' : ' disabled'}>Tolak semua</button><label class="chk" title="Garis bawahi kata yang Whisper kurang yakin. Tidak ada kata pengganti, dengarkan potongannya."><input type="checkbox" data-ch="doubt"${e.doubt ? ' checked' : ''}${nDoubt ? '' : ' disabled'}>Tandai kata ragu (${num(nDoubt)})</label><span style="flex:1"></span>${m.claude_suggest ? claudePill(m.claude_suggest) : ''}${!claudeReview && isB && m.transcript_rev ? `<button class="btn claude" data-act="openM1">${ic('spark')}Minta saran AI</button>` : ''}</div>
+  ${draftBanner}${sugFail}${gapBanner}
+  <div class="player"><button class="pbtn" id="pl-btn" data-act="playMain" aria-label="${e.play !== -1 ? 'Jeda' : 'Putar'}"${X.audio ? '' : ' disabled'}>${ic(e.play !== -1 ? 'pause' : 'play')}</button><span class="mono" style="font-size:12px" id="pl-ts">${fmtTs(cursor)}</span>${scrubHTML('asli', cursor, len, 'pl-bar')}<span class="mono muted" style="font-size:12px">${fmtDur(len)}</span><span class="muted" style="font-size:12px">${X.audio ? 'Rekaman asli' : 'Rekaman asli tidak ditemukan'}</span></div>
+  <div class="seglist" data-keep="seglist" id="seglist">${list}</div>${qpHTML(e)}</div>
+  <aside class="eside"><h3>Peserta <span class="muted" style="font-weight:400">segmen</span></h3><div class="plist">${e.parts.map((p, i) => `<div class="prow" data-pi="${i}" id="prow-${i}"><button class="grip" draggable="true" data-pi="${i}" id="grip-${i}" aria-label="Geser urutan ${esc(p.name)}. Seret, atau tekan panah atas dan bawah" title="Seret untuk mengubah urutan (↑/↓)">${ic('grip', 'sm')}</button><kbd>${i < 9 ? i + 1 : '·'}</kbd>${e.ren === i ? `<input class="field" id="ren-${i}" value="${esc(p.name)}${p.role ? ', ' + esc(p.role) : ''}" data-enter="renOk" data-i="${i}" aria-label="Nama, jabatan">` : `<span class="nm" title="${esc(p.role || '')}">${esc(p.name)}${e.base.participants && e.base.participants.find(x => x.id === p.id) ? '' : '<span class="new">baru</span>'}${p.role ? `<span class="role">${esc(p.role)}</span>` : ''}</span>`}<button class="iconb" style="width:22px;height:22px" data-act="ren" data-i="${i}" aria-label="Ubah nama ${esc(p.name)}">${ic('pencil', 'sm')}</button><span class="nb" id="pc-${i}">${num(partCount(e, p.id))}</span></div>`).join('') || '<span class="muted" style="font-size:12px">Belum ada peserta. Tambahkan supaya bisa menandai suara.</span>'}</div>
+  ${e.parts.length > 1 ? `<span class="muted" style="font-size:11.5px">Urutan menentukan tombol 1–9. Peserta ke-10 dan seterusnya: tekan <kbd>P</kbd> lalu ketik namanya, atau pilih di kolom nama segmen.</span>` : ''}
   <input class="field" id="ed-padd" placeholder="＋ Tambah peserta, lalu Enter" data-enter="padd" aria-label="Tambah peserta">
-  ${e.parts.length ? `<div style="display:grid;gap:6px;border-top:1px solid var(--line);padding-top:12px"><div style="font-size:12px"><b>Belum ditandai:</b> <span class="mono" id="un-cnt">${num(un)}</span> dari ${num(total)}</div><div class="bar thin"><i id="un-bar" style="width:${total ? (100 - un / total * 100).toFixed(1) : 0}%"></i></div><button class="btn" data-act="nextUn"${un ? '' : ' disabled'}>${ic('down')}Lompat ke berikutnya</button><span class="muted" style="font-size:11.5px">Penandaan tidak wajib. Segmen tanpa tanda ditulis “Belum ditandai”.</span></div>` : ''}
-  <div class="sc" style="border-top:1px solid var(--line);padding-top:12px;margin-top:auto"><b style="color:var(--fg)">Pintasan</b><div><kbd>↑</kbd><kbd>↓</kbd> pilih segmen</div><div><kbd>Spasi</kbd> putar potongan</div><div><kbd>1</kbd>–<kbd>9</kbd> tandai · <kbd>0</kbd> hapus</div><div><kbd>Enter</kbd> edit teks · <kbd>Esc</kbd> selesai</div><div><kbd>⌘</kbd><kbd>S</kbd> simpan</div></div>
+  ${e.parts.length ? `<div style="display:grid;gap:6px;border-top:1px solid var(--line);padding-top:12px"><div style="font-size:12px"><b>Belum ditandai:</b> <span class="mono" id="un-cnt">${num(un)}</span> dari ${num(total)}</div><div class="bar thin"><i id="un-bar" style="width:${total ? (100 - un / total * 100).toFixed(1) : 0}%"></i></div><button class="btn" data-act="nextUn" id="next-un"${un ? '' : ' disabled'}>${ic('down')}Lompat ke berikutnya</button><label class="chk"><input type="checkbox" data-ch="autoNext"${e.autoNext ? ' checked' : ''}>Setelah menandai, pindah ke segmen berikutnya</label><span class="muted" style="font-size:11.5px">Penandaan tidak wajib. Segmen tanpa tanda ditulis “Belum ditandai”.</span></div>` : ''}
+  <div class="sc" style="border-top:1px solid var(--line);padding-top:12px;margin-top:auto"><b style="color:var(--fg)">Pintasan</b><div><kbd>↑</kbd><kbd>↓</kbd> pilih segmen</div><div><kbd>Spasi</kbd> putar potongan</div><div><kbd>←</kbd><kbd>→</kbd> geser audio 5 dtk (<kbd>Shift</kbd> 30)</div><div><kbd>1</kbd>–<kbd>9</kbd> tandai · <kbd>0</kbd> hapus · <kbd>P</kbd> cari nama</div><div><kbd>Enter</kbd> edit teks · <kbd>Esc</kbd> selesai</div><div><kbd>⌫</kbd> hapus segmen · <kbd>⌘</kbd><kbd>F</kbd> cari</div><div><kbd>⌘</kbd><kbd>S</kbd> simpan</div></div>
   </aside></div>`;
 }
 let draftT = null;
@@ -516,7 +681,7 @@ async function saveDraft() {
   const e = S.ed; if (!e) return;
   clearTimeout(draftT);
   try {
-    if (edDirty(e)) await api(`/api/meetings/${encodeURIComponent(e.mid)}/draft`, { method: 'PUT', body: { segments: e.segs, participants: e.parts } });
+    if (edDirty(e)) await api(`/api/meetings/${encodeURIComponent(e.mid)}/draft`, { method: 'PUT', body: { segments: cleanSegs(e.segs), participants: e.parts } });
     else if (e.fromDraft) { await api(`/api/meetings/${encodeURIComponent(e.mid)}/draft`, { method: 'DELETE' }); }
     e.savedAt = fmtClock();
     patchEdStatus();
@@ -530,51 +695,206 @@ function patchEdStatus() {
     : (e.savedAt ? `${ic('check', 'sm')}Draf tersimpan ${e.savedAt}` : 'Belum disimpan');
   const b = $('#save-btn');
   if (b) { const claudeReview = e.claudeTotal > 0; b.disabled = e.mode === 'edit' && !dirty && !claudeReview; b.textContent = !dirty && claudeReview ? 'Selesai meninjau saran' : 'Simpan'; }
-  const rb = $('#repl-btn'); if (rb) { const n = findCount(e); rb.disabled = !n; rb.textContent = `Ganti semua${n ? ` (${n})` : ''}`; }
+}
+// redraw one row without touching the other ~1.500 (keys 1–9 stay instant)
+function patchRow(i) {
+  const e = S.ed, el = document.getElementById(`sg-${i}`), g = e && e.segs[i];
+  if (!el || !g) return false;
+  el.outerHTML = segRow(e, g, i, edCtx(e));
+  return true;
+}
+function patchParts() {
+  const e = S.ed; if (!e) return;
+  e.parts.forEach((p, i) => { const c = document.getElementById(`pc-${i}`); if (c) c.textContent = num(partCount(e, p.id)); });
+  const un = unassigned(e), total = e.segs.length;
+  const uc = $('#un-cnt'); if (uc) uc.textContent = num(un);
+  const ub = $('#un-bar'); if (ub) ub.style.width = `${total ? (100 - un / total * 100).toFixed(1) : 0}%`;
+  const nb = $('#next-un'); if (nb) nb.disabled = !un;
 }
 function selSeg(i, scroll) {
   const e = S.ed; if (!e) return;
+  const old = e.sel;
   e.sel = Math.max(0, Math.min(e.segs.length - 1, i));
-  render();
+  e.cursor = null;
+  if (e.flash && e.flash.i !== e.sel) e.flash = null;
+  if (!patchRow(old) || !patchRow(e.sel)) render();
+  const g = e.segs[e.sel];
+  const sb = $('#sec-btn'); if (sb && g) sb.innerHTML = `${ic('lock')}${g.secret ? 'Hapus rahasia' : 'Rahasia'}`;
+  if (e.play === -1 && g) setPlayer(g.start);
   if (scroll) { const el = $(`#sg-${e.sel}`); if (el) el.scrollIntoView({ block: 'nearest' }); }
 }
 function tagSel(pid) {
-  const e = S.ed; const g = e.segs[e.sel]; if (!g) return;
+  const e = S.ed; const i = e.sel, g = e.segs[i]; if (!g) return;
   g.speaker_id = pid;
+  const p = e.parts.find(x => x.id === pid);
+  e.flash = { i, text: p ? `Ditandai: ${p.name}` : 'Tanda peserta dihapus' };
+  edTouched(false);
+  patchRow(i); patchParts();
+  clearTimeout(tagSel.h);
+  tagSel.h = setTimeout(() => {
+    if (!S.ed || !S.ed.flash || S.ed.flash.i !== i) return;
+    S.ed.flash = null;
+    const m = $('#tagmsg'); if (m) m.textContent = '';
+    const sp = document.querySelector(`#sg-${i} .spk`); if (sp) sp.classList.remove('flash');
+  }, 1800);
+  if (e.autoNext && i < e.segs.length - 1) selSeg(i + 1, true);
+}
+function newId(e, prefix) {
+  const ids = new Set(e.segs.map(s => s.id));
+  let n = 1; while (ids.has(`${prefix}${pad(n).padStart(5, '0')}`)) n++;
+  return `${prefix}${pad(n).padStart(5, '0')}`;
+}
+function focusSeg(i) {
+  const el = document.querySelector(`[data-ed="${i}"]`); if (!el) return;
+  el.scrollIntoView({ block: 'nearest' });
+  el.focus();
+  const r = document.createRange(); r.selectNodeContents(el); r.collapse(false);
+  const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+}
+function delSegAt(i) {
+  const e = S.ed, g = e.segs[i]; if (!g) return;
+  if (e.segs.length <= 1) { toast('Transkrip perlu minimal satu segmen', null, 'bad'); return; }
+  const before = clone(e.segs), sel = e.sel;
+  e.segs.splice(i, 1);
+  e.sel = Math.min(i, e.segs.length - 1);
   edTouched(true);
+  toast(`Segmen ${fmtTs(g.start)} dihapus`, () => { e.segs = before; e.sel = sel; edTouched(true); });
+}
+function insertSeg(pos, st, en, text, extra) {
+  const e = S.ed;
+  const before = clone(e.segs), sel = e.sel;
+  const seg = { id: newId(e, extra && extra.gap_fill ? 'g' : 'm'), start: +st.toFixed(2), end: +Math.max(st + 0.5, en).toFixed(2), text: text || '', speaker_id: null, secret: false, ...(extra || { manual: true }) };
+  e.segs.splice(pos, 0, seg);
+  e.sel = pos;
+  return () => { e.segs = before; e.sel = sel; edTouched(true); };
 }
 
 /* ------------------------------------------------------------------ audio (F16) */
 const audio = document.getElementById('audio');
 let stopAt = null;
 function stopAudio() { audio.pause(); stopAt = null; if (S.ed) S.ed.play = -1; S.playing = null; }
+function setSrc(src) { if (audio.dataset.src !== src) { audio.src = src; audio.dataset.src = src; } }
 function playRange(src, start, end, onEnd) {
-  if (audio.dataset.src !== src) { audio.src = src; audio.dataset.src = src; }
+  setSrc(src);
   stopAt = end != null ? { t: end, cb: onEnd } : null;
-  const go2 = () => { try { audio.currentTime = start; } catch (e) { /* not seekable yet */ } audio.play().catch(() => toast('Audio tidak bisa diputar')); };
+  const go2 = () => { try { audio.currentTime = start; } catch (e) { /* not seekable yet */ } audio.play().catch(() => toast('Audio tidak bisa diputar', null, 'bad')); };
   if (audio.readyState >= 1) go2(); else audio.addEventListener('loadedmetadata', go2, { once: true });
+}
+function seekTo(src, t, then) {
+  setSrc(src);
+  const go2 = () => { try { audio.currentTime = Math.max(0, t); } catch (e) { /* not seekable yet */ } if (then) then(); };
+  if (audio.readyState >= 1) go2(); else audio.addEventListener('loadedmetadata', go2, { once: true });
+}
+function audioLen(kind) {
+  const m = S.m; if (!m) return 0;
+  if (audio.dataset.src === audioUrl(m.id, kind) && isFinite(audio.duration)) return audio.duration;
+  return (kind === 'asli' ? m.duration_sec : m.clean_sec) || 0;
+}
+const inEditor = () => S.route.name === 'meeting' && ['tinjau', 'edit'].includes(S.route.view) && S.ed;
+function setPlayer(t) {
+  const len = audioLen('asli');
+  const ts = $('#pl-ts'); if (ts) ts.textContent = fmtTs(t);
+  const b = $('#pl-bar'); if (!b) return;
+  b.style.width = `${len ? Math.min(100, t / len * 100).toFixed(2) : 0}%`;
+  b.parentElement.setAttribute('aria-valuenow', Math.round(t)); b.parentElement.setAttribute('aria-valuetext', fmtDur(t));
+}
+function patchPlay() {
+  const b = $('#pl-btn'), e = S.ed; if (!b || !e) return;
+  b.innerHTML = ic(e.play !== -1 ? 'pause' : 'play'); b.setAttribute('aria-label', e.play !== -1 ? 'Jeda' : 'Putar');
 }
 audio.addEventListener('timeupdate', () => {
   if (stopAt && audio.currentTime >= stopAt.t) { const cb = stopAt.cb; stopAt = null; audio.pause(); if (cb) cb(); }
   if (S.route.view === 'audio') patchAudio();
+  if (inEditor() && S.m && audio.dataset.src === audioUrl(S.m.id, 'asli') && !S.scrub) setPlayer(audio.currentTime);
 });
-audio.addEventListener('error', () => { if (audio.dataset.src) toast('File audio tidak bisa dibaca'); });
-audio.addEventListener('ended', () => { if (S.ed) S.ed.play = -1; S.playing = null; render(); });
+audio.addEventListener('error', () => { if (audio.dataset.src) toast('File audio tidak bisa dibaca', null, 'bad'); });
+audio.addEventListener('ended', () => { const e = S.ed; const old = e ? e.play : -1; if (e) e.play = -1; S.playing = null; if (inEditor()) { if (old >= 0) patchRow(old); patchPlay(); } else render(); });
 function playSegment(i) {
   const e = S.ed, m = S.m;
-  if (!m.audio || !m.audio.asli) { toast('Rekaman asli tidak ditemukan di lokasi awalnya'); return; }
-  if (e.play === i) { stopAudio(); render(); return; }
+  if (!m.audio || !m.audio.asli) { toast('Rekaman asli tidak ditemukan di lokasi awalnya', null, 'bad'); return; }
+  const old = e.play;
+  if (old === i) { stopAudio(); patchRow(i); patchPlay(); return; }
   const g = e.segs[i]; if (!g) return;
-  e.play = i; e.sel = i;
-  playRange(audioUrl(m.id, 'asli'), Math.max(0, g.start - 0.2), g.end + 0.3, () => { e.play = -1; render(); });
-  render();
+  const oldSel = e.sel;
+  e.play = i; e.sel = i; e.cursor = null;
+  playRange(audioUrl(m.id, 'asli'), Math.max(0, g.start - 0.2), g.end + 0.3, () => { if (S.ed === e && e.play === i) { e.play = -1; patchRow(i); patchPlay(); } });
+  [old, oldSel, i].filter((x, k, a) => x >= 0 && a.indexOf(x) === k).forEach(x => { if (!patchRow(x)) render(); });
+  patchPlay();
 }
+/* draggable position bar, editor and Audio tab (Usulan 6) */
+function scrubFrac(el, x) { const r = el.getBoundingClientRect(); return r.width ? Math.min(1, Math.max(0, (x - r.left) / r.width)) : 0; }
+function scrubLen(el) { return audioLen(el.dataset.scrub) || +el.dataset.len || 0; }
+function scrubSet(el, t) {
+  const kind = el.dataset.scrub, len = scrubLen(el);
+  const i = el.querySelector('i'); if (i) i.style.width = `${len ? Math.min(100, t / len * 100).toFixed(2) : 0}%`;
+  el.setAttribute('aria-valuenow', Math.round(t)); el.setAttribute('aria-valuetext', fmtDur(t));
+  if (inEditor()) { const ts = $('#pl-ts'); if (ts) ts.textContent = fmtTs(t); }
+  else { const tt = $(`#ap-t-${kind}`); if (tt) tt.textContent = `${fmtDur(t)} / ${fmtDur(len)}`; }
+}
+function scrubCommit(kind, t) {
+  const m = S.m; if (!m) return;
+  const src = audioUrl(m.id, kind);
+  if (inEditor()) {
+    const e = S.ed, wasPlaying = e.play !== -1 && !audio.paused;
+    if (!m.audio || !m.audio.asli) return;
+    stopAt = null;
+    // select the segment being spoken at that moment
+    let best = -1;
+    e.segs.forEach((s, k) => { if (s.start <= t + 0.05 && (best < 0 || s.start >= e.segs[best].start)) best = k; });
+    const old = e.play;
+    if (best >= 0 && best !== e.sel) {
+      const os = e.sel; e.sel = best; patchRow(os); patchRow(best);
+      const el = $(`#sg-${best}`); if (el) el.scrollIntoView({ block: 'nearest' });
+    }
+    e.cursor = t;
+    if (wasPlaying) { e.play = -2; if (old >= 0) patchRow(old); seekTo(src, t, () => audio.play().catch(() => {})); }
+    else seekTo(src, t);
+    patchPlay();
+  } else {
+    const playing = audio.dataset.src === src && !audio.paused;
+    stopAt = null;
+    seekTo(src, t, () => { if (playing) audio.play().catch(() => {}); patchAudio(); });
+  }
+}
+function nudge(kind, d) {
+  const m = S.m; if (!m) return;
+  const src = audioUrl(m.id, kind);
+  let cur = 0;
+  if (audio.dataset.src === src && audio.readyState >= 1) cur = audio.currentTime;
+  else if (inEditor()) { const e = S.ed; cur = e.cursor != null ? e.cursor : (e.segs[e.sel] || { start: 0 }).start; }
+  const len = audioLen(kind);
+  const t = Math.max(0, len ? Math.min(len, cur + d) : cur + d);
+  const el = document.querySelector(`[data-scrub="${kind}"]`); if (el) scrubSet(el, t);
+  scrubCommit(kind, t);
+}
+document.addEventListener('pointerdown', ev => {
+  const el = ev.target.closest && ev.target.closest('[data-scrub]'); if (!el || ev.button) return;
+  ev.preventDefault(); el.focus();
+  try { el.setPointerCapture(ev.pointerId); } catch (e) { /* old engine */ }
+  S.scrub = { el, t: scrubFrac(el, ev.clientX) * scrubLen(el) };
+  el.classList.add('drag'); scrubSet(el, S.scrub.t);
+});
+document.addEventListener('pointermove', ev => {
+  const el = (S.scrub && S.scrub.el) || (ev.target.closest && ev.target.closest('[data-scrub]'));
+  document.querySelectorAll('[data-scrub] .tip').forEach(t => { if (!el || !el.contains(t)) t.hidden = true; });
+  if (!el) return;
+  const f = scrubFrac(el, ev.clientX), t = f * scrubLen(el);
+  const tip = el.querySelector('.tip'); if (tip) { tip.hidden = false; tip.style.left = `${(f * 100).toFixed(2)}%`; tip.textContent = fmtDur(t); }
+  if (S.scrub) { S.scrub.t = t; scrubSet(el, t); }
+});
+document.addEventListener('pointerup', () => {
+  if (!S.scrub) return;
+  const { el, t } = S.scrub; S.scrub = null;
+  el.classList.remove('drag');
+  const tip = el.querySelector('.tip'); if (tip) tip.hidden = true;
+  scrubCommit(el.dataset.scrub, t);
+});
 
 /* ------------------------------------------------------------------ diff (S4c) */
 async function loadDiffLeft() {
   const e = S.ed, m = S.m;
   const opts = diffLeftOptions();
-  if (!opts.find(o => o[0] === S.diff.left)) S.diff.left = opts[0][0];
+  if (!opts.find(o => o[0] === S.diff.left)) S.diff.left = 'whisper';
   const rev = S.diff.left === 'saved' ? m.transcript_rev : S.diff.left === 'whisper' ? 0 : +S.diff.left.slice(1);
   S.diff.L = await api(`/api/meetings/${encodeURIComponent(m.id)}/transcript?rev=${rev}`);
   S.diff.cur = 0;
@@ -582,8 +902,8 @@ async function loadDiffLeft() {
 }
 function diffLeftOptions() {
   const m = S.m, o = [];
-  if (m.transcript_rev) o.push(['saved', `Simpan terakhir · versi ${m.transcript_rev}`]);
   o.push(['whisper', 'Asli Whisper · Transkrip asli.txt']);
+  if (m.transcript_rev) o.push(['saved', `Simpan terakhir · versi ${m.transcript_rev}`]);
   (m.versions || []).filter(v => v.rev >= 1 && v.rev < m.transcript_rev).reverse().forEach(v => o.push(['v' + v.rev, `Versi ${v.rev} · ${fmtDT(v.created)}`]));
   return o;
 }
@@ -618,10 +938,31 @@ function segDiffBody(L, R, opts) {
   const blocks2 = D.segBlocks(L.segments, R.segments, s => (s.__side === 'L' ? txtL : txtR)(s));
   let ci = 0; const out = []; const changed = [];
   let stats = { text: 0, tag: 0, merged: 0 };
+  // reverted blocks become "same"; keep them visible where they were, keyed by segment id (Usulan 8)
+  const revs = opts.editable ? (S.diff.revs || []) : [];
+  const revOf = new Map(), anchors = new Map();
+  revs.forEach((r, k) => { r.ids.forEach(id => revOf.set(id, k)); if (!r.ids.length) anchors.set(r.anchor || '^', k); });
+  const revLab = k => `<div class="dlab">${ic('revert', 'sm')}<span>Dikembalikan · belum disimpan</span><button class="btn" data-act="unrev" data-k="${k}">Urungkan</button></div>`;
+  const gone = k => `<div class="dblk rev"><div class="dl"><span class="muted" style="grid-column:1/-1;padding:4px 10px">Segmen tambahan dihapus</span></div>${revLab(k)}</div>`;
+  if (anchors.has('^')) out.push(gone(anchors.get('^')));
   blocks2.forEach((b, bi) => {
     if (b.kind === 'same') {
-      if (S.diff.only) { out.push(`<div class="fold">⋯ ${num(b.rows.length)} segmen tidak berubah ⋯</div>`); return; }
-      out.push(`<div class="dblk">${b.rows.map(r => lineHTML(txtL(r.l), txtR(r.r), r.li + 1, r.ri + 1, fmtTs(r.l.start), fmtTs(r.r.start))).join('')}</div>`);
+      const line = r => lineHTML(txtL(r.l), txtR(r.r), r.li + 1, r.ri + 1, fmtTs(r.l.start), fmtTs(r.r.start));
+      let run = [], runK = null;
+      const flush = () => {
+        if (!run.length) return;
+        if (runK != null) out.push(`<div class="dblk rev">${run.map(line).join('')}${revLab(runK)}</div>`);
+        else if (S.diff.only) out.push(`<div class="fold">⋯ ${num(run.length)} segmen tidak berubah ⋯</div>`);
+        else out.push(`<div class="dblk">${run.map(line).join('')}</div>`);
+        run = [];
+      };
+      b.rows.forEach(r => {
+        const k = revOf.has(r.r.id) ? revOf.get(r.r.id) : null;
+        if (k !== runK) { flush(); runK = k; }
+        run.push(r);
+        if (anchors.has(r.r.id)) { flush(); out.push(gone(anchors.get(r.r.id))); runK = null; }
+      });
+      flush();
       return;
     }
     b.rows.forEach(r => {
@@ -632,11 +973,7 @@ function segDiffBody(L, R, opts) {
     });
     const idx = ci++; changed.push(bi);
     const lines = b.rows.map(r => lineHTML(r.l ? txtL(r.l) : null, r.r ? txtR(r.r) : null, r.l ? r.li + 1 : '', r.r ? r.ri + 1 : '', r.l ? fmtTs(r.l.start) : '', r.r ? fmtTs(r.r.start) : '')).join('');
-    let lab = '';
-    if (opts.editable) {
-      const rv = S.diff.reverted[bi];
-      lab = `<div class="dlab">${rv ? `Dikembalikan · belum disimpan <button class="btn" data-act="unrev" data-i="${bi}">Urungkan</button>` : `<button class="btn" data-act="rev" data-i="${bi}">${ic('revert', 'sm')}Kembalikan</button>`}</div>`;
-    }
+    const lab = opts.editable ? `<div class="dlab"><button class="btn" data-act="rev" data-i="${bi}">${ic('revert', 'sm')}Kembalikan</button></div>` : '';
     out.push(`<div class="dblk${idx === S.diff.cur ? ' cur' : ''}" id="blk-${idx}">${lines}${lab}</div>`);
   });
   if (!changed.length) out.unshift(`<div class="center muted" style="padding:30px">Tidak ada perbedaan${S.diff.tags ? '' : ' pada teks (tanda peserta disembunyikan)'}.</div>`);
@@ -653,9 +990,9 @@ function statsLine(st, n, verb) {
 }
 function S4c() {
   const e = S.ed, m = S.m;
-  if (!e || !S.diff.L) return '<div class="loading"><span class="spinner lg"></span></div>';
-  S.diff.reverted = S.diff.reverted || {};
-  const L = clone(S.diff.L), R = { segments: clone(e.segs), participants: clone(e.parts) };
+  if (!e || !S.diff.L) return loadingHTML();
+  S.diff.revs = S.diff.revs || [];
+  const L = clone(S.diff.L), R = { segments: clone(cleanSegs(e.segs)), participants: clone(e.parts) };
   const r = segDiffBody(L, R, { editable: true });
   S.diff.blocks = r.blocks;
   const opts = diffLeftOptions();
@@ -674,7 +1011,7 @@ function dhead(tab) {
   const m = S.m;
   const tabs = [['transkrip', 'Transkrip'], ['ringkasan', 'Ringkasan'], ['audio', 'Audio']];
   const docx = (m.files || []).includes('Ringkasan.docx');
-  return `<div class="dh"><div class="dh-top"><div style="min-width:0">${S.editTitle ? `<input class="field" id="ttl-in" style="font-size:17px;height:32px;width:360px" value="${esc(m.title)}" data-enter="ttlOk" aria-label="Judul rapat">` : `<h1>${esc(m.title)}<button class="iconb" data-act="editTitle" aria-label="Ubah judul">${ic('pencil', 'sm')}</button></h1>`}
+  return `<div class="dh"><div class="dh-top"><div style="min-width:0">${S.editTitle ? `<div class="ttl-edit"><input class="field" id="ttl-in" maxlength="${TITLE_MAX}" style="font-size:17px;height:32px;width:420px" value="${esc(m.title)}" data-enter="ttlOk" data-in="ttlin" aria-label="Judul rapat" aria-describedby="ttl-msg"><button class="btn pri" data-act="ttlSave">Simpan</button><button class="btn ghost" data-act="ttlCancel">Batal</button></div><div class="fmsg" id="ttl-msg" role="status" hidden></div><div class="fnote">Nama folder ikut diganti. Karakter / : \\ tidak bisa dipakai.</div>` : `<h1>${esc(m.title)}<button class="iconb" data-act="editTitle" aria-label="Ubah judul">${ic('pencil', 'sm')}</button></h1>`}
   <div class="meta"><span class="mono">${fmtDate(m.created)}</span>·<span class="mono">${fmtDur(m.duration_sec)}${m.clean_sec && m.settings && m.settings.remove_silence !== false ? ` (bersih ${fmtDur(m.clean_sec)})` : ''}</span>·<span>${LANG[m.language] || 'Otomatis'}</span>·<span>${num(m.counts.total)} segmen</span>${m.claude_suggest ? claudePill(m.claude_suggest) : ''}${m.v1 ? v1Pill() : ''}</div></div>
   <div style="display:flex;gap:6px;flex:none"><button class="btn" data-go="${mhash(m.id, 'edit')}"${m.job ? ' disabled' : ''}>${ic('pencil')}Edit transkrip</button><button class="btn ghost" data-act="finder">${ic('folder')}Buka di Finder</button>${docx ? `<button class="btn ghost" data-act="finder" data-file="Ringkasan.docx">${ic('dl')}Tampilkan .docx</button>` : ''}<button class="btn ghost dng" data-act="openM4">${ic('trash')}Hapus</button></div></div>
   <div class="tabs" role="tablist">${tabs.map(t => `<button class="tab" role="tab" data-go="${mhash(m.id, t[0])}" aria-selected="${tab === t[0]}">${t[1]}${t[0] === 'ringkasan' && m.stale ? `${ic('warn', 'sm')}<span class="sr">usang</span>` : ''}</button>`).join('')}</div></div>`;
@@ -686,7 +1023,7 @@ async function loadVersion(sel) {
 }
 function S6() {
   const m = S.m, v = S.ver;
-  if (!v) return dhead('transkrip') + '<div class="loading"><span class="spinner lg"></span></div>';
+  if (!v) return dhead('transkrip') + loadingHTML();
   const names = nameMap(v.participants);
   const parts = v.participants || [];
   const segs = v.segments || [];
@@ -710,7 +1047,7 @@ function S6() {
   <div id="s6-rows">${rowsHTML}</div></div>
   <aside class="eside"><h3>Peserta</h3>${parts.length ? parts.map(p => { const c = segs.filter(s => s.speaker_id === p.id).length; return `<div style="display:grid;gap:4px;font-size:12.5px"><div style="display:flex;justify-content:space-between;gap:6px"><span>${esc(p.name)}${p.role ? `<span class="muted" style="display:block;font-size:11px">${esc(p.role)}</span>` : ''}</span><span class="mono muted">${num(c)}</span></div><div class="bar thin"><i style="width:${(c / total * 100).toFixed(1)}%"></i></div></div>`; }).join('') +
   `<div style="display:grid;gap:4px;font-size:12.5px"><div style="display:flex;justify-content:space-between"><span class="muted">Belum ditandai</span><span class="mono muted">${num(un)}</span></div><div class="bar thin"><i style="width:${(un / total * 100).toFixed(1)}%;background:var(--fg-3)"></i></div></div>` : `<span class="muted" style="font-size:12px">${m.v1 ? 'Hasil v1 tidak punya daftar peserta.' : 'Daftar peserta tidak diisi.'} Tambahkan di editor bila perlu.</span>`}
-  <button class="btn" data-go="${mhash(m.id, 'edit')}">Kelola di editor</button><span class="muted" style="font-size:11.5px">Nama dan tanda peserta hanya diubah di editor, supaya ada satu tempat mengedit.</span></aside></div>`;
+  <span class="muted" style="font-size:11.5px">Nama dan tanda peserta diubah lewat Edit transkrip.</span></aside></div>`;
 }
 
 /* ------------------------------------------------------------------ S6b ringkasan */
@@ -765,7 +1102,7 @@ function S6b() {
   const m = S.m;
   if (!m.summary_count) return S6d();
   const s = S.sum;
-  if (!s) return dhead('ringkasan') + '<div class="loading"><span class="spinner lg"></span></div>';
+  if (!s) return dhead('ringkasan') + loadingHTML();
   const view = s.info.ver, latest = view === m.summary_count;
   const vs = (m.summaries || []).slice().reverse().map(x => `<option value="${x.ver === m.summary_count ? 'latest' : x.ver}"${x.ver === view ? ' selected' : ''}>Ringkasan versi ${x.ver}${x.ver === m.summary_count ? ' (terbaru)' : ''} · dari transkrip v${x.based_on_rev}</option>`).join('');
   const red = s.info.redaction || {};
@@ -782,7 +1119,7 @@ function S6b() {
 function S6d() {
   const m = S.m;
   const err = m.summary_error ? `<div class="banner bad" style="justify-self:stretch;text-align:left">${ic('warn')}<span class="grow">${esc(m.summary_error)}</span></div>` : '';
-  return dhead('ringkasan') + `<div class="dbody one"><div class="dmain"><div class="center"><div class="s5" style="width:470px"><div class="glyph">${ic('doc', 'lg')}</div><h2>Rapat ini belum punya ringkasan</h2><p>Transkrip sudah tersimpan. Ringkasan dibuat oleh Claude, dan Anda akan diminta konfirmasi sebelum teks dikirim.</p>${err}
+  return dhead('ringkasan') + `<div class="dbody one"><div class="dmain"><div class="center"><div class="s5" style="width:470px"><div class="glyph">${ic('doc', 'lg')}</div><h2>Rapat ini belum punya ringkasan</h2><p>Transkrip sudah tersimpan. Ringkasan dibuat oleh ${toAI()}${AI().local ? '' : ', dan Anda akan diminta konfirmasi sebelum teks dikirim'}.</p>${err}
   <div style="justify-self:stretch;text-align:left"><div class="fgl">Konteks tambahan (opsional)</div><textarea class="field" id="ctx-d" rows="2" style="width:100%" placeholder="Misalnya: fokus pada keputusan dan action item" data-in="ctx">${esc(S.ctx)}</textarea></div>
   <button class="btn pri lg" data-act="openM2b"${m.job ? ' disabled' : ''}>Buat Ringkasan</button></div></div></div></div>`;
 }
@@ -794,7 +1131,7 @@ function S6c() {
     const on = audio.dataset.src === audioUrl(m.id, kind);
     const playing = on && !audio.paused;
     const pos = on ? audio.currentTime : 0, len = on && isFinite(audio.duration) ? audio.duration : (kind === 'asli' ? m.duration_sec : m.clean_sec) || 0;
-    return `<div class="card aplayer"><div class="top"><button class="pbtn" data-act="aplay" data-a="${kind}" aria-label="${playing ? 'Jeda' : 'Putar'}">${ic(playing ? 'pause' : 'play')}</button><h3>${title}</h3><span class="mono muted" style="font-size:12px" id="ap-t-${kind}">${fmtDur(pos)} / ${fmtDur(len)}</span><span style="flex:1"></span><select class="pop" data-ch="arate" aria-label="Kecepatan">${[1, 1.25, 1.5, 2].map(r => `<option value="${r}"${audio.playbackRate === r ? ' selected' : ''}>${String(r).replace('.', ',')}×</option>`).join('')}</select></div><div class="aprog" data-act="seek" data-a="${kind}" role="slider" aria-label="Posisi ${title}" aria-valuemin="0" aria-valuemax="${Math.round(len)}" aria-valuenow="${Math.round(pos)}"><i id="ap-b-${kind}" style="width:${len ? (pos / len * 100).toFixed(2) : 0}%"></i></div><div class="muted" style="font-size:12px;display:flex;gap:6px;align-items:center">${sub}</div></div>`;
+    return `<div class="card aplayer"><div class="top"><button class="pbtn" data-act="aplay" data-a="${kind}" aria-label="${playing ? 'Jeda' : 'Putar'}">${ic(playing ? 'pause' : 'play')}</button><h3>${title}</h3><span class="mono muted" style="font-size:12px" id="ap-t-${kind}">${fmtDur(pos)} / ${fmtDur(len)}</span><span style="flex:1"></span><select class="pop" data-ch="arate" aria-label="Kecepatan">${[1, 1.25, 1.5, 2].map(r => `<option value="${r}"${audio.playbackRate === r ? ' selected' : ''}>${String(r).replace('.', ',')}×</option>`).join('')}</select></div>${scrubHTML(kind, pos, len, `ap-b-${kind}`)}<div class="muted" style="font-size:12px;display:flex;gap:6px;align-items:center">${sub}</div></div>`;
   };
   const asli = m.audio.asli ? player('asli', 'Rekaman asli', `${ic('info', 'sm')}Timestamp transkrip mengacu ke rekaman asli. ${esc(m.source_name || '')}`)
     : `<div class="banner warn">${ic('warn')}<span class="grow">Rekaman asli tidak ditemukan di lokasi awalnya${m.source_name ? ` (${esc(m.source_name)})` : ''}. Pemutaran per segmen butuh rekaman asli.</span></div>`;
@@ -809,7 +1146,7 @@ function patchAudio() {
     const t = $(`#ap-t-${k}`), b = $(`#ap-b-${k}`);
     const len = isFinite(audio.duration) ? audio.duration : 0;
     if (t) t.textContent = `${fmtDur(audio.currentTime)} / ${fmtDur(len)}`;
-    if (b) b.style.width = `${len ? (audio.currentTime / len * 100).toFixed(2) : 0}%`;
+    if (b && !S.scrub) { b.style.width = `${len ? (audio.currentTime / len * 100).toFixed(2) : 0}%`; b.parentElement.setAttribute('aria-valuenow', Math.round(audio.currentTime)); b.parentElement.setAttribute('aria-valuetext', fmtDur(audio.currentTime)); }
   });
 }
 
@@ -820,11 +1157,11 @@ function S5() {
     if (m.summary_error) {
       return tb(ttl(esc(m.title), 'Membuat ringkasan'), '', mhash(m.id, 'transkrip')) + `<div class="pane" style="display:flex"><div class="center"><div class="s5"><div class="glyph" style="background:var(--bad-bg);color:var(--bad)">${ic('warn', 'lg')}</div><h2>Ringkasan belum bisa dibuat</h2><p>${esc(m.summary_error)} Transkrip tidak berubah.</p><div style="display:flex;gap:8px"><button class="btn" data-go="#/pengaturan">Buka Pengaturan</button><button class="btn pri" data-act="openM2b">Coba lagi</button></div></div></div></div>`;
     }
-    return '<div class="loading"><span class="spinner lg"></span></div>';
+    return loadingHTML();
   }
   const done = ['restore'].includes(p.phase);
   return tb(ttl(esc(m.title), 'Membuat ringkasan'), '', '#/riwayat') + `<div class="pane" style="display:flex"><div class="center"><div class="s5"><span class="spinner lg" style="color:var(--accent)"></span><h2>Membuat ringkasan…</h2><p>Biasanya 30–60 detik. Transkrip sudah tersimpan, jadi aman kalau jendela ditutup.</p>
-  <ul class="steps"><li><span class="stp done">${ic('check', 'sm')}</span>${num(p.masked)} data sensitif disamarkan, ${num(p.withheld)} segmen rahasia ditahan</li><li><span class="stp done">${ic('check', 'sm')}</span>${num(p.words)} kata dikirim ke Anthropic</li><li><span class="stp ${done ? 'done' : 'run'}">${done ? ic('check', 'sm') : '<span class="spinner" style="width:10px;height:10px"></span>'}</span>${done ? '' : '<b>'}Menunggu ringkasan dari ${esc(p.model || '')}${done ? '' : '</b>'}</li><li><span class="stp ${done ? 'run' : ''}">${done ? '<span class="spinner" style="width:10px;height:10px"></span>' : ''}</span><span class="${done ? '' : 'muted2'}">Memulihkan kata yang disamarkan, di Mac ini</span></li></ul></div></div></div>`;
+  <ul class="steps"><li><span class="stp done">${ic('check', 'sm')}</span>${num(p.masked)} data sensitif disamarkan, ${num(p.withheld)} segmen rahasia ditahan</li><li><span class="stp done">${ic('check', 'sm')}</span>${num(p.words)} kata ${AI().local ? 'diproses model lokal di Mac ini' : `dikirim ke ${esc(AI().provider_short)}`}</li><li><span class="stp ${done ? 'done' : 'run'}">${done ? ic('check', 'sm') : '<span class="spinner" style="width:10px;height:10px"></span>'}</span>${done ? '' : '<b>'}Menunggu ringkasan dari ${esc(p.model || '')}${done ? '' : '</b>'}</li><li><span class="stp ${done ? 'run' : ''}">${done ? '<span class="spinner" style="width:10px;height:10px"></span>' : ''}</span><span class="${done ? '' : 'muted2'}">Memulihkan kata yang disamarkan, di Mac ini</span></li></ul></div></div></div>`;
 }
 
 /* ------------------------------------------------------------------ S6e / S6f riwayat versi */
@@ -887,7 +1224,7 @@ function sumDiffBody(a, b) {
 function histScreen(kind) {
   const m = S.m, H = kind === 'tr' ? S.hist : S.shist;
   const back = mhash(m.id, kind === 'tr' ? 'transkrip' : 'ringkasan');
-  if (!H.L || !H.R) return '<div class="loading"><span class="spinner lg"></span></div>';
+  if (!H.L || !H.R) return loadingHTML();
   const list = histList(kind);
   const latestN = list.length ? list[list.length - 1].n : 0;
   const latest = H.Rn === latestN;
@@ -910,30 +1247,49 @@ async function loadSettings() {
   S.settings = s; S.sendlog = l.sends;
 }
 function S7() {
-  const s = S.settings; if (!s) return '<div class="loading"><span class="spinner lg"></span></div>';
+  const s = S.settings; if (!s) return loadingHTML();
   const c = s.config;
   const f = Object.entries(s.categories);
-  const keyRow = S.keyEdit ? `<div class="keyin"><input class="field" type="password" id="key-in" style="flex:1" placeholder="sk-ant-…" autocomplete="off" data-enter="keySave" aria-label="API key Anthropic"><button class="btn pri" data-act="keySave">Simpan ke Keychain</button><button class="btn ghost" data-act="keyTog">Batal</button></div>` : '';
-  const log = S.sendlog.length ? `<table class="sendlog">${S.sendlog.map(x => `<tr><td>${fmtDT(x.at)}</td><td>${x.kind === 'suggest' ? 'Saran Claude' : 'Ringkasan'} · ${esc(x.meeting || '')} · ${num(x.words)} kata · ${num(x.masked)} disamarkan${x.withheld ? ` · ${x.withheld} rahasia ditahan` : ''}</td></tr>`).join('')}</table>` : '<span class="muted" style="font-size:12px">Belum pernah ada teks yang dikirim.</span>';
+  const ai = s.ai, pv = ai.providers.find(p => p.id === ai.provider) || ai.providers[0];
+  const pname = id => ((ai.providers.find(p => p.id === id) || {}).short) || id;
+  const keyRow = S.keyEdit && pv.key ? `<div class="keyin"><input class="field" type="password" id="key-in" style="flex:1" placeholder="${pv.prefix ? esc(pv.prefix) + '…' : 'API key'}" autocomplete="off" data-enter="keySave" aria-label="API key ${esc(pv.short)}"><button class="btn pri" data-act="keySave">Simpan ke Keychain</button><button class="btn ghost" data-act="keyTog">Batal</button></div>` : '';
+  const log = S.sendlog.length ? `<table class="sendlog">${S.sendlog.map(x => `<tr><td>${fmtDT(x.at)}</td><td>${x.kind === 'suggest' ? 'Saran AI' : 'Ringkasan'} · ${esc(x.meeting || '')} · ${esc(pname(x.provider || 'anthropic'))}${x.model ? ` ${esc(x.model)}` : ''} · ${num(x.words)} kata · ${num(x.masked)} disamarkan${x.withheld ? ` · ${x.withheld} rahasia ditahan` : ''}</td></tr>`).join('')}</table>` : '<span class="muted" style="font-size:12px">Belum pernah ada teks yang dikirim.</span>';
+  const CONF = [['anthropic', 'Ya, setelah filter', 'Data API tidak dipakai melatih model secara default.'],
+    ['openai', 'Ya, setelah filter', 'Data API tidak dipakai melatih model secara default, tetapi bisa disimpan sementara untuk pemantauan penyalahgunaan.'],
+    ['gemini', 'Ya, setelah filter', 'Tingkat gratis boleh dipakai Google untuk perbaikan produk. Pakai key berbayar.'],
+    ['compat', 'Tergantung server', 'Aman bila servernya milik atau disetujui kantor Anda.'],
+    ['ollama', 'Tidak', 'Paling aman. Butuh RAM besar, lebih lambat, kualitas bahasa Indonesia di bawah model cloud besar.']];
+  const urlRow = pv.id === 'compat' || pv.id === 'ollama' ? `<div class="row"><div class="lb"><label for="ai-url">Alamat server</label><small>${pv.id === 'ollama' ? 'Bawaan Ollama di Mac ini' : 'Alamat API yang kompatibel OpenAI, diakhiri /v1'}</small></div><div class="rv"><input class="field mono" id="ai-url" style="width:280px" value="${esc(pv.base_url)}" placeholder="https://…/v1" data-ch="aiurl" spellcheck="false"></div></div>` : '';
+  const keyStatus = pv.key ? `<div class="row"><div class="lb">${pv.has_key ? `<span class="conn">${ic('check', 'sm')}API key ${esc(pv.short)} tersimpan di Keychain</span><small>Isi key tidak pernah ditampilkan. Key penyedia lain tetap tersimpan.</small>` : `<span>Belum ada API key ${esc(pv.short)}</span><small>Ringkasan dan saran AI butuh key</small>`}</div><div class="rv">${S.keyMsg ? `<span class="conn">${S.keyMsg}</span>` : ''}<button class="btn" data-act="testConn"${pv.has_key ? '' : ' disabled'}>Tes koneksi</button><button class="btn" data-act="keyTog">${pv.has_key ? 'Ganti key…' : 'Tambah key…'}</button>${pv.has_key ? '<button class="btn ghost dng" data-act="keyDel">Hapus</button>' : ''}</div></div>${keyRow}`
+    : `<div class="row"><div class="lb"><span class="conn">${ic('lock', 'sm')}Tanpa API key</span><small>Model berjalan di Mac ini lewat Ollama. Teks tidak keluar dari Mac.</small></div><div class="rv">${S.keyMsg ? `<span class="conn">${S.keyMsg}</span>` : ''}<button class="btn" data-act="testConn">Tes koneksi</button></div></div>`;
   return tb(ttl('Pengaturan'), '') + `<div class="pane set"><div class="form">
-  <div><div class="fgl">${ic('key', 'sm')}API key Anthropic</div><div class="group">
-   <div class="row"><div class="lb">${s.api_key ? `<span class="conn">${ic('check', 'sm')}Tersimpan di Keychain</span><small>Isi key tidak pernah ditampilkan</small>` : '<span>Belum ada key</span><small>Ringkasan dan saran Claude butuh key</small>'}</div><div class="rv">${S.keyMsg ? `<span class="conn">${S.keyMsg}</span>` : ''}<button class="btn" data-act="testConn"${s.api_key ? '' : ' disabled'}>Tes koneksi</button><button class="btn" data-act="keyTog">${s.api_key ? 'Ganti key…' : 'Tambah key…'}</button>${s.api_key ? '<button class="btn ghost dng" data-act="keyDel">Hapus</button>' : ''}</div></div>${keyRow}
-   <div class="row"><div class="lb">Model ringkasan<small>Juga dipakai untuk saran Claude</small></div><div class="rv"><select class="pop" data-ch="cfg" data-k="claude_model" aria-label="Model">${s.models.map(x => `<option${c.claude_model === x ? ' selected' : ''}>${x}</option>`).join('')}</select></div></div></div></div>
+  <div><div class="fgl">${ic('spark', 'sm')}Layanan AI untuk ringkasan dan saran kata</div><div class="group">
+   <div class="row"><div class="lb"><label for="ai-prov">Penyedia</label><small>Transkripsi tetap di Mac ini dengan Whisper</small></div><div class="rv"><select class="pop" id="ai-prov" data-ch="aiprov">${ai.providers.map(p => `<option value="${p.id}"${p.id === pv.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div></div>
+   ${urlRow}${keyStatus}
+   <div class="row"><div class="lb"><label for="ai-model">Model</label><small>${pv.models.length ? 'Pilih dari daftar, atau ketik nama model lain' : 'Ketik nama model dari server Anda'}</small></div><div class="rv"><input class="field mono" id="ai-model" list="ai-models" style="width:220px" value="${esc(pv.model)}" data-ch="aimodel" spellcheck="false" autocomplete="off"><datalist id="ai-models">${pv.models.map(x => `<option value="${esc(x)}"></option>`).join('')}</datalist></div></div>
+   ${pv.id === 'gemini' ? `<div class="row"><div class="lb"><span style="color:var(--warn);display:inline-flex;gap:6px;align-items:center">${ic('warn', 'sm')}Pakai key Gemini berbayar</span><small>Data dari key tingkat gratis boleh dipakai Google untuk perbaikan produk.</small></div></div>` : ''}
+  </div>
+  <details class="conf"><summary>${ic('lock', 'sm')}Ke mana teks dikirim? Kerahasiaan per penyedia</summary><table class="ctab"><thead><tr><th>Penyedia</th><th>Keluar dari Mac?</th><th>Catatan</th></tr></thead><tbody>${CONF.map(r => `<tr${r[0] === pv.id ? ' class="on"' : ''}><td>${esc(pname(r[0]))}${r[0] === pv.id ? ' <span class="pill p-info mini">dipakai</span>' : ''}</td><td>${r[1] === 'Tidak' ? ic('lock', 'sm') : ic('send', 'sm')}${r[1]}</td><td>${r[2]}</td></tr>`).join('')}</tbody></table><p class="muted" style="font-size:11.5px;margin:6px 2px 0">Ketentuan umum per penyedia. Cek ulang ke ketentuan terbaru dan kebijakan TI/kepatuhan kantor Anda sebelum memakai penyedia baru untuk rapat sungguhan.</p></details></div>
   <div><div class="fgl">Tampilan</div><div class="group"><div class="row"><div class="lb">Tema<small>Sistem mengikuti pengaturan macOS</small></div><div class="rv"><div class="segc" role="group" aria-label="Tema aplikasi">${[['system', 'Sistem'], ['light', 'Terang'], ['dark', 'Gelap']].map(t => `<button data-act="theme" data-v="${t[0]}" aria-pressed="${theme === t[0]}">${t[1]}</button>`).join('')}</div></div></div></div></div>
   <div><div class="fgl">Default rapat baru</div><div class="group"><div class="row"><div class="lb">Bahasa</div><div class="rv"><select class="pop" data-ch="cfg" data-k="language" aria-label="Bahasa default">${Object.entries(LANG).map(([k, v]) => `<option value="${k}"${c.language === k ? ' selected' : ''}>${v}</option>`).join('')}</select></div></div>
    <div class="row"><div class="lb">Buang hening lebih dari</div><div class="rv"><input class="field mono" id="s7-sil" value="${String(c.min_silence_sec).replace('.', ',')}" style="width:56px;text-align:right" data-ch="cfgnum" data-k="min_silence_sec" aria-label="Detik"> detik</div></div>
    <div class="row"><div class="lb">Penanda kata ragu<small>Whisper menandai kata yang kurang yakin (sedikit lebih lambat)</small></div><div class="rv">${sw('wordconf', c.word_confidence, 'Penanda kata ragu')}</div></div>
    <div class="row"><div class="lb">Istilah penting<small>Pisahkan dengan koma</small></div><div class="rv" style="flex:1"><input class="field" id="s7-terms" style="width:100%" value="${esc(c.vocabulary)}" data-ch="cfg" data-k="vocabulary" aria-label="Istilah penting"></div></div></div></div>
-  <div><div class="fgl">${ic('lock', 'sm')}Filter data sebelum dikirim ke Anthropic</div><div class="group">
+  <div><div class="fgl">${ic('lock', 'sm')}Filter data sebelum dikirim ke layanan AI</div><div class="group">
    <div class="row" style="align-items:flex-start"><div class="lb">Samarkan otomatis<small>Diganti token, dipulihkan di Mac ini</small></div><div class="rv fgrid">${f.map(x => `<button class="ftog" data-act="ftog" data-f="${x[0]}" aria-pressed="${!!c.redact[x[0]]}"><span class="bx">${c.redact[x[0]] ? ic('check', 'sm') : ''}</span>${x[1]}</button>`).join('')}</div></div>
    <div class="row" style="align-items:flex-start"><div class="lb">Kata sensitif<small>Satu baris per kata atau nama, misalnya nama klien</small></div><div class="rv" style="flex:1"><textarea class="field" id="s7-words" rows="3" style="width:100%" data-ch="cfg" data-k="sensitive_words" aria-label="Kata sensitif">${esc(c.sensitive_words)}</textarea></div></div></div></div>
   <div><div class="fgl">Penyimpanan</div><div class="group"><div class="row"><div class="lb">Folder hasil<small class="mono">${esc(homeDir(s.output_root))}</small></div><div class="rv"><button class="btn" data-act="openRoot">${ic('folder')}Buka</button></div></div>
    <div class="row" style="align-items:flex-start"><div class="lb">Riwayat pengiriman<small>Yang dicatat hanya jumlah, bukan isi</small></div><div class="rv" style="flex:1;max-width:420px">${log}</div></div></div></div>
-  <div class="muted" style="font-size:11.5px;padding:0 4px">Meeting Notes ${esc((S.state || {}).version || '')} · server lokal 127.0.0.1, tidak bisa diakses dari jaringan</div>
+  <div class="muted" style="font-size:11.5px;padding:0 4px">Meeting Report ${esc((S.state || {}).version || '')} · server lokal 127.0.0.1, tidak bisa diakses dari jaringan</div>
   </div></div>`;
 }
-async function saveCfg(patch) {
-  try { S.settings = await api('/api/settings', { method: 'PUT', body: patch }); toast('Pengaturan disimpan'); } catch (e) { fail(e); }
+async function saveCfg(patch, quiet) {
+  try {
+    S.settings = await api('/api/settings', { method: 'PUT', body: patch });
+    await loadState();
+    if (!quiet) toast('Pengaturan disimpan');
+    render();
+  } catch (e) { fail(e); }
 }
 
 /* ------------------------------------------------------------------ sheets */
@@ -943,7 +1299,8 @@ function filtHTML() {
   const mark = t => esc(t).replace(/‹[A-Z]+_\d+›/g, x => `<span class="tok">${x}</span>`);
   return `<div class="filt"><div class="fh">${ic('lock')}<span class="grow">${num(p.withheld)} segmen bertanda Rahasia tidak dikirim · ${num(p.masked)} data sensitif disamarkan</span><button class="btn ghost" data-act="prev">${ic('eye')}${S.prevOpen ? 'Tutup pratinjau' : 'Pratinjau teks yang dikirim'}</button></div>${S.prevOpen ? `<div class="prev">${mark(p.header)}\n\n${mark(p.transcript)}${p.context ? `\n\nKonteks: ${mark(p.context)}` : ''}</div>` : ''}</div>`;
 }
-const keyWarn = () => (S.state && !S.state.api_key) ? `<div class="banner warn">${ic('key')}<span class="grow">API key Anthropic belum diisi.</span><button class="btn" data-act="toSettings">Buka Pengaturan</button></div>` : '';
+const keyWarn = () => (S.state && !S.state.api_key) ? `<div class="banner warn">${ic('key')}<span class="grow">API key ${esc(AI().provider_short)} belum diisi.</span><button class="btn" data-act="toSettings">Buka Pengaturan</button></div>` : '';
+const sendTxt = n => AI().local ? `${n} kata transkrip diproses model lokal di Mac ini (Ollama, ${esc(AI().model)}). Tidak ada yang keluar dari Mac.` : `${n} kata transkrip akan dikirim ke ${esc(AI().provider_name)} (${esc(AI().model)}). Audio tidak dikirim.`;
 async function loadPreview() {
   S.prev = null; render();
   try { S.prev = await post(`/api/meetings/${encodeURIComponent(S.m.id)}/preview`, { context: S.ctx }); } catch (e) { fail(e); }
@@ -952,24 +1309,24 @@ async function loadPreview() {
 function sheet() {
   const m = S.m || {};
   const nWords = S.prev ? num(S.prev.words) : '…';
-  if (S.modal === 'm1') return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t"><h2 id="sh-t"><span class="ico" style="background:var(--claude-bg);color:var(--claude)">${ic('spark', 'lg')}</span>Kirim transkrip ke Anthropic untuk saran?</h2>
-  <p>Claude akan membaca ${nWords} kata transkrip versi ${m.transcript_rev} dan daftar istilah penting, lalu mengusulkan perbaikan salah dengar dan ejaan. Audio tidak dikirim.</p>${keyWarn()}${filtHTML()}
-  <p>Opsional. Usulan tampil sebagai saran di editor, dan tidak ada yang diterapkan sebelum Anda klik Terima. Rapat ini lalu diberi tanda <b style="color:var(--claude)">${ic('spark', 'sm')} Disarankan Claude</b>.</p>
+  if (S.modal === 'm1') return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t"><h2 id="sh-t"><span class="ico" style="background:var(--claude-bg);color:var(--claude)">${ic('spark', 'lg')}</span>${AI().local ? 'Minta saran dari model lokal?' : `Kirim transkrip ke ${esc(AI().provider_short)} untuk saran?`}</h2>
+  <p>${sendTxt(nWords)} Model membaca transkrip versi ${m.transcript_rev} dan daftar istilah penting, lalu mengusulkan perbaikan salah dengar dan ejaan.</p>${keyWarn()}${filtHTML()}
+  <p>Opsional. Usulan tampil sebagai saran di editor, dan tidak ada yang diterapkan sebelum Anda klik Terima. Rapat ini lalu diberi tanda <b style="color:var(--claude)">${ic('spark', 'sm')} Disarankan AI</b>.</p>
   <div class="acts"><button class="btn lg" data-act="close">Batal</button><button class="btn pri lg" data-act="sendM1"${S.state && S.state.api_key ? '' : ' disabled'}>Kirim dan minta saran</button></div></div>`;
   if (S.modal === 'm2') return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t"><div class="ok">${ic('check', 'sm')}Transkrip versi ${m.transcript_rev} tersimpan</div><h2 id="sh-t">Buat ringkasan rapat sekarang?</h2>
-  <p>Untuk membuat ringkasan, ${nWords} kata transkrip yang sudah Anda tinjau akan dikirim ke Anthropic (Claude). Audio tidak dikirim.</p>${keyWarn()}
+  <p>Untuk membuat ringkasan, ${sendTxt(nWords)}</p>${keyWarn()}
   <div><div class="fgl">Konteks tambahan (opsional)</div><textarea class="field" id="ctx-m2" rows="2" style="width:100%" placeholder="Misalnya: fokus ke keputusan dan action item per wilayah" data-in="ctx">${esc(S.ctx)}</textarea></div>${filtHTML()}
-  <div class="acts">${m.claude_suggest ? `<span class="sp">${claudePill(m.claude_suggest)}</span>` : `<button class="btn lg claude sp" data-act="openM1">${ic('spark')}Minta saran Claude dulu</button>`}<button class="btn lg" data-act="onlyT">Transkrip Saja</button><button class="btn pri lg" data-act="startSum"${S.state && S.state.api_key ? '' : ' disabled'}>Buat Ringkasan</button></div></div>`;
+  <div class="acts">${m.claude_suggest ? `<span class="sp">${claudePill(m.claude_suggest)}</span>` : `<button class="btn lg claude sp" data-act="openM1">${ic('spark')}Minta saran AI dulu</button>`}<button class="btn lg" data-act="onlyT">Transkrip Saja</button><button class="btn pri lg" data-act="startSum"${S.state && S.state.api_key ? '' : ' disabled'}>Buat Ringkasan</button></div></div>`;
   if (S.modal === 'm2b') {
     const re = m.summary_count > 0;
     return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t"><h2 id="sh-t"><span class="ico" style="background:var(--accent-soft);color:var(--accent)">${ic('send', 'lg')}</span>${re ? (m.stale ? 'Perbarui ringkasan?' : 'Buat ulang ringkasan?') : 'Buat ringkasan?'}</h2>
-    <p>${nWords} kata transkrip versi ${m.transcript_rev} akan dikirim ke Anthropic (Claude). Audio tidak dikirim.</p>${re ? `<p>Ringkasan versi ${m.summary_count} tetap disimpan. Hasil baru menjadi versi ${m.summary_count + 1}.</p>` : ''}${keyWarn()}
+    <p>${sendTxt(nWords)} Dasar: transkrip versi ${m.transcript_rev}.</p>${re ? `<p>Ringkasan versi ${m.summary_count} tetap disimpan. Hasil baru menjadi versi ${m.summary_count + 1}.</p>` : ''}${keyWarn()}
     <div><div class="fgl">Konteks tambahan (opsional)</div><textarea class="field" id="ctx-m2b" rows="2" style="width:100%" placeholder="${re ? 'Misalnya: pakai nama peserta yang baru ditandai' : 'Misalnya: fokus pada keputusan'}" data-in="ctx">${esc(S.ctx)}</textarea></div>${filtHTML()}
     <div class="acts"><button class="btn lg" data-act="close">Batal</button><button class="btn pri lg" data-act="startSum"${S.state && S.state.api_key ? '' : ' disabled'}>${re ? (m.stale ? 'Perbarui ringkasan' : 'Buat ulang ringkasan') : 'Buat ringkasan'}</button></div></div>`;
   }
   if (S.modal === 'm4') return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t"><h2 id="sh-t"><span class="ico" style="background:var(--bad-bg);color:var(--bad)">${ic('trash', 'lg')}</span>Pindahkan rapat ini ke Trash?</h2>
   <p>Folder <b class="mono" style="font-size:12px">${esc(m.id)}</b> beserta transkrip, audio bersih, dan ringkasan dipindah ke Trash macOS. Rekaman asli${m.source_name ? ` (${esc(m.source_name)})` : ''} di lokasi awalnya tidak terhapus.</p><p class="muted">Masih bisa dipulihkan dari Trash.</p>
-  <div class="acts"><button class="btn lg" data-act="close">Batal</button><button class="btn lg" style="background:var(--bad);color:#fff;border-color:transparent" data-act="del">Pindahkan ke Trash</button></div></div>`;
+  <div class="acts"><button class="btn lg" data-act="close">Batal</button><button class="btn lg danger" data-act="del">${ic('trash')}Pindahkan ke Trash</button></div></div>`;
   if (S.modal === 'm5') {
     const li = changeList(S.lastSave || {});
     const sm = (m.summaries || [])[m.summaries.length - 1] || {};
@@ -988,7 +1345,7 @@ function screenHTML() {
   if (r.name === 'new') return S2();
   if (r.name === 'settings') return S7();
   if (r.name === 'meeting') {
-    if (!S.m || S.m.id !== r.id) return '<div class="loading"><span class="spinner lg"></span></div>';
+    if (!S.m || S.m.id !== r.id) return loadingHTML();
     switch (r.view) {
       case 'progres': return S3();
       case 'tinjau': case 'edit': return editorHTML();
@@ -1010,11 +1367,11 @@ function render() {
   const sel = fid && ae.selectionStart != null ? [ae.selectionStart, ae.selectionEnd] : null;
   const keep = {};
   app.querySelectorAll('[data-keep]').forEach(el => { keep[el.dataset.keep] = el.scrollTop; });
-  app.innerHTML = `<div class="win">${sidebar()}<main class="content">${screenHTML()}</main>${S.modal ? `<div class="scrim" data-act="close"></div>${sheet()}` : ''}${S.toast ? `<div class="toast" role="status">${ic('check')}${esc(S.toast.text)}${S.toast.undo ? `<button class="btn" data-act="undo">Urungkan</button>` : ''}</div>` : ''}</div>`;
+  app.innerHTML = `<div class="win">${sidebar()}<main class="content">${screenHTML()}</main>${S.modal ? `<div class="scrim" data-act="close"></div>${sheet()}` : ''}${toastHTML()}</div>`;
   app.querySelectorAll('[data-keep]').forEach(el => { if (keep[el.dataset.keep] != null) el.scrollTop = keep[el.dataset.keep]; });
   if (fid) { const el = document.getElementById(fid); if (el) { el.focus(); if (sel && el.setSelectionRange) try { el.setSelectionRange(sel[0], sel[1]); } catch (e) { /* not text */ } } }
   const ren = app.querySelector('[id^="ren-"]'); if (ren && !fid) ren.focus();
-  const ti = $('#ttl-in'); if (ti && !fid) ti.focus();
+  const ti = $('#ttl-in'); if (ti && !fid) { ti.focus(); ti.setSelectionRange(ti.value.length, ti.value.length); }
 }
 
 /* ------------------------------------------------------------------ actions */
@@ -1022,23 +1379,27 @@ const curMid = () => S.m && S.m.id;
 const A = {
   close() { S.modal = null; S.prevOpen = false; render(); },
   toSettings() { S.modal = null; go('#/pengaturan'); },
-  undo() { const u = S.toast && S.toast.undo; S.toast = null; if (u) u(); render(); },
+  undo() { const u = S.toast && S.toast.undo; S.toast = null; patchToast(); if (u) u(); },
+  reload() { route(); },
   async pickFile() {
     try {
       const f = await post('/api/pick-file');
       if (f.cancel) return;
       if (!f.audio) toast('File ini mungkin bukan audio. Whisper tetap akan mencoba.');
-      S.s2.file = f; if (!S.s2.title) S.s2.title = stem(f.name); render();
+      s2File(f); render();
     } catch (e) { fail(e); }
   },
   s2trim() { S.s2.trim = !S.s2.trim; render(); },
   s2clean() { S.s2.clean = !S.s2.clean; render(); },
   s2rm(el) { S.s2.parts.splice(+el.dataset.i, 1); render(); },
   async process(el) {
-    const s = S.s2; el.disabled = true;
+    const s = S.s2;
+    const bad = titleMsg(s.title);
+    if (bad) { s.titleTouched = true; render(); const t = $('#s2-title'); if (t) t.focus(); return; }
+    el.disabled = true;
     try {
       const r = await post('/api/meetings', { source_path: s.file.path, title: s.title, language: s.lang, remove_silence: s.trim,
-        save_clean_audio: s.clean && s.trim, vocabulary: s.terms, participants: s.parts });
+        save_clean_audio: s.clean && s.trim, vocabulary: s.terms, participants: s.parts, audio_track: s.track });
       S.s2 = null;
       await loadState();
       go(mhash(r.id, 'progres'));
@@ -1054,11 +1415,66 @@ const A = {
   async finder(el) { try { await post(`/api/meetings/${encodeURIComponent(curMid())}/reveal`, { file: el.dataset.file || '' }); } catch (e) { fail(e); } },
   async openRoot() { try { await post('/api/reveal-root'); } catch (e) { fail(e); } },
   editTitle() { S.editTitle = true; render(); },
+  ttlSave() { const t = $('#ttl-in'); if (t) saveTitle(t.value.trim()); },
+  ttlCancel() { S.editTitle = false; render(); },
   // editor
   selSeg(el, ev) { if (ev.target.closest('select,button,.stext')) { if (ev.target.closest('.stext')) { S.ed.sel = +el.dataset.i; markSel(); } return; } selSeg(+el.dataset.i); },
   playSeg(el, ev) { ev.stopPropagation(); playSegment(+el.dataset.i); },
+  playMain() {
+    const e = S.ed, m = S.m;
+    if (e.play !== -1) { const old = e.play; stopAudio(); if (old >= 0) patchRow(old); patchPlay(); return; }
+    if (e.cursor == null) { playSegment(e.sel); return; }
+    e.play = -2;
+    playRange(audioUrl(m.id, 'asli'), e.cursor, null);
+    patchPlay();
+  },
+  delSeg(el, ev) { if (ev) ev.stopPropagation(); const e = S.ed; delSegAt(el && el.dataset.i != null ? +el.dataset.i : e.sel); },
+  insSeg() {
+    const e = S.ed, i = e.sel, g = e.segs[i], nx = e.segs[i + 1];
+    const st = g ? g.end : 0, en = nx && nx.start > st ? nx.start : st + 3;
+    const undo = insertSeg(i + 1, st, en);
+    edTouched(true); focusSeg(i + 1);
+    toast('Segmen manual disisipkan. Ketik isinya.', undo, 'info');
+  },
+  gapPlay(el) {
+    const a = +el.dataset.a, b = +el.dataset.b, e = S.ed;
+    if (!S.m.audio || !S.m.audio.asli) return;
+    const old = e.play; e.play = -2; if (old >= 0) patchRow(old);
+    playRange(audioUrl(S.m.id, 'asli'), Math.max(0, a - 0.5), b + 0.5, () => { if (S.ed === e) { e.play = -1; patchPlay(); } });
+    patchPlay();
+  },
+  async gapRe(el) {
+    const a = +el.dataset.a, b = Math.min(+el.dataset.b, +el.dataset.a + 600), e = S.ed, mid = curMid();
+    S.gapBusy = a.toFixed(1); render();
+    try {
+      const r = await post(`/api/meetings/${encodeURIComponent(mid)}/retranscribe`, { start: a, end: b });
+      S.gapBusy = null;
+      if (S.ed !== e) return;
+      if (!r.segments.length) { e.gapSkip[a.toFixed(1)] = true; render(); toast('Whisper tidak menemukan ucapan di bagian ini. Sisipkan manual bila perlu.', null, 'info'); return; }
+      const before = clone(e.segs), sel = e.sel;
+      r.segments.forEach(x => {
+        let pos = e.segs.findIndex(s => s.start > x.start); if (pos < 0) pos = e.segs.length;
+        insertSeg(pos, x.start, x.end, x.text, { gap_fill: true });
+      });
+      e.sel = e.segs.findIndex(s => s.gap_fill && s.start >= r.segments[0].start - 0.01);
+      edTouched(true);
+      const el2 = $(`#sg-${e.sel}`); if (el2) el2.scrollIntoView({ block: 'center' });
+      toast(`${r.segments.length} segmen ditambahkan dari celah. Periksa, lalu Simpan.`, () => { e.segs = before; e.sel = sel; edTouched(true); });
+    } catch (err) { S.gapBusy = null; render(); fail(err); }
+  },
+  gapIns(el) {
+    const a = +el.dataset.a, b = +el.dataset.b, e = S.ed;
+    let pos = e.segs.findIndex(s => s.start >= b - 0.05); if (pos < 0) pos = e.segs.length;
+    const undo = insertSeg(pos, a, b);
+    edTouched(true); focusSeg(pos);
+    toast('Segmen manual disisipkan di celah. Ketik isinya.', undo, 'info');
+  },
+  gapSkip(el) { S.ed.gapSkip[(+el.dataset.a).toFixed(1)] = true; render(); },
+  gapNext() { const g = document.querySelector('.gaprow'); if (g) { g.scrollIntoView({ block: 'center' }); g.classList.add('pulse'); setTimeout(() => g.classList.remove('pulse'), 900); } },
+  findNav(el) { findStep(+el.dataset.v); },
+  qpPick(el) { const e = S.ed; e.qp = null; render(); tagSel(el.dataset.id); },
   revSeg(el, ev) { ev.stopPropagation(); const e = S.ed, g = e.segs[+el.dataset.i]; g.text = e.orig[g.id]; edTouched(true); },
-  secret(el, ev) { ev.stopPropagation(); const g = S.ed.segs[+el.dataset.i]; if (g) { g.secret = !g.secret; edTouched(true); } },
+  secret(el, ev) { ev.stopPropagation(); const e = S.ed; const g = e.segs[el.dataset.i != null ? +el.dataset.i : e.sel]; if (g) { g.secret = !g.secret; edTouched(true); } },
   merge() {
     const e = S.ed, i = e.sel; if (i >= e.segs.length - 1) { toast('Pilih segmen yang punya segmen sesudahnya'); return; }
     const a = e.segs[i], b = e.segs[i + 1];
@@ -1094,8 +1510,16 @@ const A = {
     const before = clone(e.segs);
     const re = new RegExp(e.find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
     let n = 0; e.segs.forEach(g => { g.text = g.text.replace(re, () => { n++; return e.repl; }); });
-    e.find = ''; edTouched(true);
+    e.find = ''; e.hit = 0; edTouched(true);
     toast(`${n} kata diganti`, () => { e.segs = before; edTouched(true); });
+  },
+  replOne() {
+    const e = S.ed, hits = findHits(e), h = hits[e.hit]; if (!h) return;
+    const g = e.segs[h.i], before = g.text;
+    g.text = g.text.slice(0, h.p) + e.repl + g.text.slice(h.p + e.find.length);
+    if (e.hit >= findHits(e).length) e.hit = 0;
+    edTouched(true); findStep(0);
+    toast('1 kata diganti', () => { g.text = before; edTouched(true); });
   },
   sugOk(el, ev) { ev.stopPropagation(); applySug(+el.dataset.j); edTouched(true); },
   sugNo(el, ev) { ev.stopPropagation(); S.ed.sugs[+el.dataset.j].st = 'no'; edTouched(true); },
@@ -1115,8 +1539,8 @@ const A = {
   async dropDraft() {
     try { await api(`/api/meetings/${encodeURIComponent(S.ed.mid)}/draft`, { method: 'DELETE' }); S.m.has_draft = false; await loadEditor(S.route.view); toast('Draf dibuang'); render(); } catch (e) { fail(e); }
   },
-  async closeEd() { await saveDraft(); const dirty = S.ed && edDirty(S.ed); S.ed = null; S.m = await api(`/api/meetings/${encodeURIComponent(curMid())}`); if (dirty) toast('Editan disimpan sebagai draf, belum jadi versi baru'); go(mhash(curMid(), 'transkrip')); },
-  openDiff() { saveDraft(); S.diff.reverted = {}; go(mhash(curMid(), 'bandingkan')); },
+  async closeEd() { stopAudio(); await saveDraft(); const dirty = S.ed && edDirty(S.ed); S.ed = null; S.m = await api(`/api/meetings/${encodeURIComponent(curMid())}`); if (dirty) toast('Editan disimpan sebagai draf, belum jadi versi baru'); go(mhash(curMid(), 'transkrip')); },
+  openDiff() { saveDraft(); S.diff.revs = []; go(mhash(curMid(), 'bandingkan')); },
   async save() { await saveTranscript(); },
   openM1() { S.modal = 'm1'; S.prevOpen = false; loadPreview(); },
   async sendM1() {
@@ -1194,12 +1618,6 @@ const A = {
     if (audio.dataset.src !== src) { audio.src = src; audio.dataset.src = src; }
     stopAt = null; audio.play().catch(() => toast('Audio tidak bisa diputar')); setTimeout(render, 50);
   },
-  seek(el, ev) {
-    const kind = el.dataset.a, src = audioUrl(curMid(), kind);
-    const r = el.getBoundingClientRect(), f = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
-    const doSeek = () => { if (isFinite(audio.duration)) audio.currentTime = f * audio.duration; patchAudio(); };
-    if (audio.dataset.src !== src) { audio.src = src; audio.dataset.src = src; audio.addEventListener('loadedmetadata', doSeek, { once: true }); } else doSeek();
-  },
   // diff
   dmode(el) { S.diff.mode = el.dataset.v; render(); },
   dnav(el) {
@@ -1208,14 +1626,31 @@ const A = {
     const b = document.getElementById('blk-' + S.diff.cur); if (b) b.scrollIntoView({ block: 'center' });
   },
   rev(el) {
-    const e = S.ed, bi = +el.dataset.i, block = S.diff.blocks[bi];
-    S.diff.reverted[bi] = clone(e.segs);
+    const e = S.ed, block = S.diff.blocks[+el.dataset.i]; if (!block) return;
+    const strip = s => { const x = { ...s }; delete x.__side; return x; };
+    const rights = block.rows.filter(r => r.r).map(r => strip(clone(r.r)));
+    const res = D.revertBlock(e.segs, block, S.diff.blocks);
+    e.segs = res.map(strip);
+    const anchor = res.start > 0 ? e.segs[res.start - 1].id : null;
+    S.diff.revs.push({ ids: res.ids.slice(), rights, anchor });
     // revert speaker names too when the left side had them
-    e.segs = D.revertBlock(e.segs, block, S.diff.blocks).map(s => { const x = { ...s }; delete x.__side; return x; });
     const L = S.diff.L; (L.participants || []).forEach(p => { if (e.segs.some(s => s.speaker_id === p.id) && !e.parts.find(x => x.id === p.id)) e.parts.push(clone(p)); });
     edTouched(true);
   },
-  unrev(el) { const e = S.ed, bi = +el.dataset.i; if (S.diff.reverted[bi]) { e.segs = S.diff.reverted[bi]; delete S.diff.reverted[bi]; edTouched(true); } },
+  unrev(el) {
+    const e = S.ed, k = +el.dataset.k, r = S.diff.revs[k]; if (!r) return;
+    let pos;
+    if (r.ids.length) {
+      const idset = new Set(r.ids);
+      pos = e.segs.findIndex(s => idset.has(s.id));
+      e.segs = e.segs.filter(s => !idset.has(s.id));
+      if (pos < 0) pos = e.segs.length;
+    } else pos = r.anchor ? e.segs.findIndex(s => s.id === r.anchor) + 1 : 0;
+    const ids = new Set(e.segs.map(s => s.id));
+    e.segs.splice(pos, 0, ...r.rights.map(s => (ids.has(s.id) ? { ...s, id: `${s.id}-u` } : s)));
+    S.diff.revs.splice(k, 1);
+    edTouched(true);
+  },
   // settings
   theme(el) { applyTheme(el.dataset.v); saveCfg({ theme: el.dataset.v }); },
   ftog(el) { const c = S.settings.config; const r = { ...c.redact, [el.dataset.f]: !c.redact[el.dataset.f] }; saveCfg({ redact: r }); },
@@ -1223,12 +1658,16 @@ const A = {
   keyTog() { S.keyEdit = !S.keyEdit; S.keyMsg = ''; render(); setTimeout(() => { const k = $('#key-in'); if (k) k.focus(); }, 30); },
   async keySave() {
     const k = $('#key-in'); if (!k || !k.value.trim()) return;
-    try { await post('/api/settings/api-key', { key: k.value.trim() }); k.value = ''; S.keyEdit = false; S.keyMsg = ''; await loadSettings(); await loadState(); toast('API key disimpan di Keychain'); } catch (e) { fail(e); }
+    const provider = S.settings.ai.provider;
+    try { await post('/api/settings/api-key', { key: k.value.trim(), provider }); k.value = ''; S.keyEdit = false; S.keyMsg = ''; await loadSettings(); await loadState(); toast('API key disimpan di Keychain'); render(); } catch (e) { fail(e); }
   },
-  async keyDel() { try { await api('/api/settings/api-key', { method: 'DELETE' }); await loadSettings(); await loadState(); toast('API key dihapus dari Keychain'); } catch (e) { fail(e); } },
+  async keyDel() {
+    const provider = S.settings.ai.provider;
+    try { await api(`/api/settings/api-key?provider=${encodeURIComponent(provider)}`, { method: 'DELETE' }); await loadSettings(); await loadState(); toast('API key dihapus dari Keychain'); render(); } catch (e) { fail(e); }
+  },
   async testConn() {
     S.keyMsg = '<span class="spinner"></span> Menguji…'; render();
-    try { const r = await post('/api/settings/test-key'); S.keyMsg = r.ok ? `${ic('check', 'sm')}Terhubung` : `${ic('warn', 'sm')}${esc(r.message)}`; } catch (e) { S.keyMsg = `${ic('warn', 'sm')}${esc(e.message)}`; }
+    try { const r = await post('/api/settings/test-key', { provider: S.settings.ai.provider }); S.keyMsg = r.ok ? `${ic('check', 'sm')}Terhubung` : `${ic('warn', 'sm')}${esc(r.message)}`; } catch (e) { S.keyMsg = `${ic('warn', 'sm')}${esc(e.message)}`; }
     render();
   },
 };
@@ -1238,6 +1677,33 @@ function applySug(j) {
   const i = g.text.indexOf(s.from);
   if (i >= 0) g.text = g.text.slice(0, i) + s.to + g.text.slice(i + s.from.length);
   s.st = 'ok';
+}
+function findStep(d) {
+  const e = S.ed, hits = findHits(e); if (!hits.length) return;
+  e.hit = ((e.hit + d) % hits.length + hits.length) % hits.length;
+  e.sel = hits[e.hit].i;
+  render();
+  const m = document.querySelector('#seglist mark.fh.cur') || $(`#sg-${e.sel}`);
+  if (m) m.scrollIntoView({ block: 'center' });
+}
+async function saveTitle(v) {
+  const msg = titleMsg(v), el = $('#ttl-msg');
+  if (msg) { if (el) { el.innerHTML = ic('warn', 'sm') + esc(msg); el.hidden = false; } return; }
+  if (v === S.m.title) { S.editTitle = false; render(); return; }
+  try {
+    const old = S.m.id;
+    const m = await api(`/api/meetings/${encodeURIComponent(old)}`, { method: 'PATCH', body: { title: v } });
+    S.m = m; S.editTitle = false;
+    if (m.id !== old) { S.route.id = m.id; history.replaceState(null, '', mhash(m.id, S.route.view)); }
+    toast(m.id !== old ? 'Judul dan nama folder diubah' : 'Judul diubah');
+    render();
+  } catch (e) { if (el) { el.innerHTML = ic('warn', 'sm') + esc(e.message); el.hidden = false; } else fail(e); }
+}
+function moveParticipant(from, to) {
+  const e = S.ed; if (!e || from === to || to < 0 || to >= e.parts.length) return false;
+  const [p] = e.parts.splice(from, 1); e.parts.splice(to, 0, p);
+  edTouched(true);
+  return true;
 }
 function markSel() { document.querySelectorAll('.sg.on').forEach(x => x.classList.remove('on')); const el = $(`#sg-${S.ed.sel}`); if (el) el.classList.add('on'); }
 async function saveTranscript() {
@@ -1250,11 +1716,12 @@ async function saveTranscript() {
     if (e.mode === 'edit' && !dirty) {
       if (!claude) return;
       S.m = await post(`/api/meetings/${encodeURIComponent(m.id)}/claude-review`, claude);
-      S.ed = null; toast('Saran Claude selesai ditinjau, tidak ada perubahan'); go(mhash(m.id, 'transkrip'));
+      S.ed = null; toast('Saran AI selesai ditinjau, tidak ada perubahan'); go(mhash(m.id, 'transkrip'));
       return;
     }
     const local = edChanges(e);
-    const r = await post(`/api/meetings/${encodeURIComponent(m.id)}/save`, { segments: e.segs, participants: e.parts, claude });
+    stopAudio();
+    const r = await post(`/api/meetings/${encodeURIComponent(m.id)}/save`, { segments: cleanSegs(e.segs), participants: e.parts, claude });
     S.m = r.meeting; S.ed = null; S.vsel = 'latest';
     if (e.mode === 'review') { S.modalNext = 'm2'; S.prevOpen = false; S.prev = null; go(mhash(m.id, 'transkrip')); loadPreview(); return; }
     if (!r.changed) { toast('Tidak ada perubahan, versi tidak bertambah'); go(mhash(m.id, 'transkrip')); return; }
@@ -1280,9 +1747,15 @@ document.addEventListener('input', ev => {
   }
   const k = t.dataset && t.dataset.in; if (!k) return;
   if (k === 'q') { S.q = t.value; clearTimeout(A._qT); A._qT = setTimeout(async () => { await loadList(); const tb2 = $('#s1-rows'); if (tb2) tb2.innerHTML = rowsHTML(); }, 200); }
-  else if (k === 's2title') S.s2.title = t.value;
+  else if (k === 's2title') {
+    S.s2.titleTouched = true;
+    S.s2.title = titleInput(t, 's2-title-msg');
+    const b = document.querySelector('[data-act="process"]'); if (b) b.disabled = fileBlocked(S.s2.file) || !!S.s2.uploading || !!titleMsg(S.s2.title);
+  }
+  else if (k === 'ttlin') titleInput(t, 'ttl-msg');
+  else if (k === 'qp') { const e = S.ed; e.qp.q = t.value; e.qp.k = 0; const q = document.querySelector('.qp'); if (q) { const v = t.value; q.outerHTML = qpHTML(e); const n = $('#qp-in'); if (n) { n.focus(); n.setSelectionRange(v.length, v.length); } } }
   else if (k === 's2terms') S.s2.terms = t.value;
-  else if (k === 'find') { S.ed.find = t.value; render(); }
+  else if (k === 'find') { S.ed.find = t.value; S.ed.hit = 0; render(); }
   else if (k === 'repl') S.ed.repl = t.value;
   else if (k === 's6q') { S.s6q = t.value; render(); }
   else if (k === 'ctx') { S.ctx = t.value; clearTimeout(A._cT); A._cT = setTimeout(async () => { if (S.modal && S.prevOpen) { try { S.prev = await post(`/api/meetings/${encodeURIComponent(S.m.id)}/preview`, { context: S.ctx }); render(); } catch (e) { /* ignore */ } } }, 500); }
@@ -1292,8 +1765,15 @@ document.addEventListener('change', async ev => {
   try {
     if (k === 'fstat') { S.fstat = t.value; await loadList(); render(); }
     else if (k === 's2lang') S.s2.lang = t.value;
+    else if (k === 's2track') S.s2.track = t.value === 'mix' ? 'mix' : +t.value;
     else if (k === 's2from') { const r = S.recent.find(x => x.id === t.value); if (r) { S.s2.parts = r.participants.map(p => ({ name: p.name, role: p.role || '' })); render(); } }
-    else if (k === 'spk') { const e = S.ed; const g = e.segs[+t.dataset.i]; g.speaker_id = t.value || null; e.sel = +t.dataset.i; edTouched(true); }
+    else if (k === 'spk') { const e = S.ed; const i = +t.dataset.i; if (e.sel !== i) selSeg(i); tagSel(t.value || null); }
+    else if (k === 'onlyHits') { S.ed.onlyHits = t.checked; render(); }
+    else if (k === 'doubt') { S.ed.doubt = t.checked; render(); }
+    else if (k === 'autoNext') { S.ed.autoNext = t.checked; }
+    else if (k === 'aiprov') { S.keyEdit = false; S.keyMsg = ''; await saveCfg({ ai_provider: t.value }, true); toast(`Penyedia AI: ${S.settings.ai.provider_name}`); }
+    else if (k === 'aimodel') { const v = t.value.trim(); if (v) await saveCfg({ ai_models: { [S.settings.ai.provider]: v } }); }
+    else if (k === 'aiurl') { const v = t.value.trim(); if (v && !/^https?:\/\//.test(v)) { toast('Alamat server harus diawali http:// atau https://', null, 'bad'); return; } await saveCfg({ ai_base_url: { [S.settings.ai.provider]: v } }); }
     else if (k === 'dleft') { S.diff.left = t.value; await loadDiffLeft(); render(); }
     else if (k === 'donly') { S.diff.only = t.checked; render(); }
     else if (k === 'dtags') { S.diff.tags = t.checked; render(); }
@@ -1302,7 +1782,7 @@ document.addEventListener('change', async ev => {
     else if (k === 'sver') { S.ssel = t.value; await loadSummary(S.ssel); render(); }
     else if (k === 'arate') { audio.playbackRate = +t.value; }
     else if (k === 'cfg') { await saveCfg({ [t.dataset.k]: t.value }); }
-    else if (k === 'cfgnum') { const v = parseFloat(t.value.replace(',', '.')); if (v > 0 && v < 30) await saveCfg({ [t.dataset.k]: v }); else toast('Isi angka antara 0,5 dan 30'); }
+    else if (k === 'cfgnum') { const v = parseFloat(t.value.replace(',', '.')); if (v > 0 && v < 30) await saveCfg({ [t.dataset.k]: v }); else toast('Isi angka antara 0,5 dan 30', null, 'bad'); }
   } catch (e) { fail(e); }
 });
 function parsePerson(v) { const i = v.indexOf(','); return i > 0 ? { name: v.slice(0, i).trim(), role: v.slice(i + 1).trim() } : { name: v.trim(), role: '' }; }
@@ -1314,29 +1794,79 @@ document.addEventListener('keydown', ev => {
     if (k === 's2add' && v) { S.s2.parts.push(parsePerson(v)); t.value = ''; render(); }
     if (k === 'padd' && v) { const e = S.ed; let n = e.parts.length + 1; const ids = new Set(e.parts.map(p => p.id)); while (ids.has('p' + n)) n++; e.parts.push({ id: 'p' + n, ...parsePerson(v) }); t.value = ''; edTouched(true); }
     if (k === 'renOk') { const e = S.ed, p = e.parts[+t.dataset.i]; if (v) Object.assign(p, parsePerson(v)); e.ren = -1; edTouched(true); }
-    if (k === 'ttlOk') { S.editTitle = false; if (v && v !== S.m.title) api(`/api/meetings/${encodeURIComponent(S.m.id)}`, { method: 'PATCH', body: { title: v } }).then(m => { S.m = m; toast('Judul diubah'); render(); }).catch(fail); else render(); }
+    if (k === 'ttlOk') saveTitle(v);
     if (k === 'keySave') A.keySave();
+    return;
+  }
+  // search box: Enter next hit, Shift+Enter previous
+  if (t.id === 'ed-find' && ev.key === 'Enter') { ev.preventDefault(); findStep(S.ed.find && findHits(S.ed).length ? (ev.shiftKey ? -1 : 1) : 0); setTimeout(() => { const f = $('#ed-find'); if (f) f.focus(); }, 0); return; }
+  if (t.id === 'ed-find' && ev.key === 'Escape') { S.ed.find = ''; S.ed.hit = 0; render(); return; }
+  // quick participant picker (P)
+  if (t.id === 'qp-in') {
+    const e = S.ed, list = qpList(e);
+    if (ev.key === 'Escape') { ev.preventDefault(); e.qp = null; render(); return; }
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); e.qp.k = Math.max(0, Math.min(list.length - 1, e.qp.k + (ev.key === 'ArrowDown' ? 1 : -1))); const q = document.querySelector('.qp'); if (q) { q.outerHTML = qpHTML(e); const n = $('#qp-in'); if (n) n.focus(); } return; }
+    if (ev.key === 'Enter') { ev.preventDefault(); const p = list[e.qp.k]; e.qp = null; render(); if (p) tagSel(p.id); return; }
+    return;
+  }
+  // participant order: arrow keys on the grip handle
+  if (t.classList && t.classList.contains('grip') && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) {
+    ev.preventDefault(); const i = +t.dataset.pi, j = i + (ev.key === 'ArrowUp' ? -1 : 1);
+    if (moveParticipant(i, j)) setTimeout(() => { const g = $(`#grip-${j}`); if (g) g.focus(); }, 0);
     return;
   }
   if (ev.key === 'Escape') {
     if (S.modal) { A.close(); return; }
+    if (S.ed && S.ed.qp) { S.ed.qp = null; render(); return; }
     if (t.dataset && t.dataset.ed != null) { t.blur(); render(); return; }
     if (S.editTitle) { S.editTitle = false; render(); return; }
     if (S.ed && S.ed.ren >= 0) { S.ed.ren = -1; render(); return; }
   }
-  const inEditor = S.route.name === 'meeting' && (S.route.view === 'tinjau' || S.route.view === 'edit') && S.ed && !S.waitSuggest;
-  if ((ev.metaKey || ev.ctrlKey) && ev.key === 's' && inEditor) { ev.preventDefault(); if (t.blur) t.blur(); saveTranscript(); return; }
+  const inEd = S.route.name === 'meeting' && (S.route.view === 'tinjau' || S.route.view === 'edit') && S.ed && !S.waitSuggest;
+  if ((ev.metaKey || ev.ctrlKey) && ev.key === 's' && inEd) { ev.preventDefault(); if (t.blur) t.blur(); saveTranscript(); return; }
+  if ((ev.metaKey || ev.ctrlKey) && ev.key === 'f' && inEd) { ev.preventDefault(); const f = $('#ed-find'); if (f) { f.focus(); f.select(); } return; }
   const typing = t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName);
-  if (!inEditor || typing || S.modal || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  // ← → move the audio position: editor, Audio tab, or a focused position bar
+  if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && !typing && !S.modal && !ev.metaKey && !ev.ctrlKey && !ev.altKey && S.m && S.route.name === 'meeting') {
+    const d = (ev.key === 'ArrowLeft' ? -1 : 1) * (ev.shiftKey ? 30 : 5);
+    const kind = t.dataset && t.dataset.scrub ? t.dataset.scrub : inEd ? 'asli' : S.route.view === 'audio' ? (audio.dataset.src === audioUrl(S.m.id, 'bersih') ? 'bersih' : 'asli') : null;
+    if (kind && (kind !== 'asli' || (S.m.audio && S.m.audio.asli))) { ev.preventDefault(); nudge(kind, d); return; }
+  }
+  if (!inEd || typing || S.modal || ev.metaKey || ev.ctrlKey || ev.altKey) return;
   const e = S.ed;
+  if (e.qp) return;
   if (ev.key === 'ArrowDown') { ev.preventDefault(); selSeg(e.sel + 1, true); }
   else if (ev.key === 'ArrowUp') { ev.preventDefault(); selSeg(e.sel - 1, true); }
-  else if (ev.key === ' ') { ev.preventDefault(); playSegment(e.play >= 0 ? e.play : e.sel); }
+  else if (ev.key === ' ') { ev.preventDefault(); if (e.play !== -1) A.playMain(); else playSegment(e.sel); }
+  else if (ev.key === 'Backspace' || ev.key === 'Delete') { ev.preventDefault(); delSegAt(e.sel); }
+  else if ((ev.key === 'p' || ev.key === 'P') && e.parts.length) { ev.preventDefault(); e.qp = { q: '', k: 0 }; render(); const q = $('#qp-in'); if (q) q.focus(); }
   else if (ev.key === 'Enter') { ev.preventDefault(); const el = document.querySelector(`[data-ed="${e.sel}"]`); if (el) { el.focus(); const r = document.createRange(); r.selectNodeContents(el); r.collapse(false); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); } }
-  else if (/^[1-9]$/.test(ev.key)) { const p = e.parts[+ev.key - 1]; if (p) { tagSel(p.id); if (e.sel < e.segs.length - 1) selSeg(e.sel + 1, true); } }
+  else if (/^[1-9]$/.test(ev.key)) { const p = e.parts[+ev.key - 1]; if (p) tagSel(p.id); }
   else if (ev.key === '0') tagSel(null);
 });
 document.addEventListener('focusout', ev => { if (ev.target.dataset && ev.target.dataset.ed != null) setTimeout(() => { if (!document.activeElement || document.activeElement.dataset.ed == null) render(); }, 0); });
+// drag a participant row to change the order (keys 1–9 follow the order)
+document.addEventListener('dragstart', ev => {
+  const g = ev.target.closest && ev.target.closest('.grip[draggable]'); if (!g) return;
+  S.dragP = +g.dataset.pi;
+  ev.dataTransfer.effectAllowed = 'move';
+  try { ev.dataTransfer.setData('text/plain', 'peserta'); } catch (e) { /* ignore */ }
+  const row = g.closest('.prow'); if (row) { row.classList.add('dragging'); try { ev.dataTransfer.setDragImage(row, 12, 12); } catch (e) { /* ignore */ } }
+});
+document.addEventListener('dragover', ev => {
+  if (S.dragP == null) return;
+  const r = ev.target.closest && ev.target.closest('.prow'); if (!r) return;
+  ev.preventDefault();
+  document.querySelectorAll('.prow.over').forEach(x => { if (x !== r) x.classList.remove('over'); });
+  r.classList.add('over');
+});
+document.addEventListener('drop', ev => {
+  if (S.dragP == null) return;
+  const r = ev.target.closest && ev.target.closest('.prow');
+  const from = S.dragP; S.dragP = null;
+  if (r) { ev.preventDefault(); ev.stopImmediatePropagation(); moveParticipant(from, +r.dataset.pi); }
+}, true);
+document.addEventListener('dragend', () => { S.dragP = null; document.querySelectorAll('.prow.over,.prow.dragging').forEach(x => x.classList.remove('over', 'dragging')); });
 // drag and drop a recording anywhere in the window
 document.addEventListener('dragover', ev => { if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) { ev.preventDefault(); const d = ev.target.closest && ev.target.closest('.drop'); document.querySelectorAll('.drop.over').forEach(x => { if (x !== d) x.classList.remove('over'); }); if (d) d.classList.add('over'); } });
 document.addEventListener('dragleave', ev => { const d = ev.target.closest && ev.target.closest('.drop'); if (d) d.classList.remove('over'); });
@@ -1345,8 +1875,21 @@ document.addEventListener('drop', ev => {
   ev.preventDefault();
   const f = ev.dataTransfer.files[0];
   if (S.route.name === 'meeting' && ['tinjau', 'edit'].includes(S.route.view)) return;
+  // in the Mac window the launcher sends the dropped file's path (MN.dropPath), so the file is
+  // read where it is; a plain browser has no path and falls back to copying it in
+  if (window.pywebview) { clearTimeout(A._dropT); A._dropT = setTimeout(() => uploadFile(f), 3000); return; }
   uploadFile(f);
 });
+window.MN = window.MN || {};
+window.MN.dropPath = async path => {
+  clearTimeout(A._dropT);
+  if (S.route.name === 'meeting' && ['tinjau', 'edit'].includes(S.route.view)) return;
+  try {
+    const f = await post('/api/file-info', { path });
+    if (!S.s2) await initNew(f); else { s2File(f); }
+    if (S.route.name !== 'new') go('#/baru'); else render();
+  } catch (e) { fail(e); }
+};
 
 /* ------------------------------------------------------------------ start */
 (async function start() {

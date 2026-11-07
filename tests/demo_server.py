@@ -37,22 +37,37 @@ LINES = [
 ]
 
 
-def fake_audio(path):
+def fake_audio(path, start=None, dur=None, track=None):
     sr = core.SR
     out = []
     for _ in range(len(LINES)):
         t = np.arange(int(sr * 4)) / sr
         out.append((0.3 * np.sin(2 * np.pi * 200 * t)).astype(np.float32))
         out.append(np.zeros(int(sr * 3), dtype=np.float32))
-    return np.concatenate(out)
+    a = np.concatenate(out)
+    if start is not None:
+        a = a[int(start * sr):]
+        a = a[:int(dur * sr)] if dur else a
+    return a
 
 
 def fake_chunk(audio, language, prompt, repo, wc):
-    time.sleep(1.5)
     n = len(audio) / core.SR
+    if prompt is None:
+        # a gap tried again: inside the job Whisper finds nothing (so the editor can show
+        # the gap banner); "Transkrip ulang bagian ini" from the editor finds a line
+        import threading
+        if threading.current_thread().name == "mn-worker":
+            return []
+        time.sleep(0.8)
+        return [{"start": min(1.0, n / 4), "end": max(n - 1.0, n * 3 / 4),
+                 "text": "Untuk wilayah timur kami usulkan pendampingan tambahan.", "avg_logprob": -0.4,
+                 "low_words": []}]
+    time.sleep(1.5)
     k = len(LINES)
+    skip = {5, 6} if n > 15 else set()   # Whisper skipped a stretch here
     return [{"start": i * n / k, "end": (i + 0.9) * n / k, "text": t, "avg_logprob": -0.3, "low_words": lw}
-            for i, (t, lw) in enumerate(LINES)]
+            for i, (t, lw) in enumerate(LINES) if i not in skip]
 
 
 def fake_claude(system, user, key, model, max_tokens):
@@ -95,7 +110,7 @@ st = store_mod.Store(root / "out")
 bus = jobs_mod.Bus()
 jb = jobs_mod.Jobs(st, bus, load_audio=fake_audio, transcribe_chunk=fake_chunk,
                    save_m4a=lambda a, p: Path(p).write_bytes(b""), claude=fake_claude,
-                   api_key=lambda: "sk-ant-demo")
+                   api_key=lambda p=None: "sk-ant-demo")
 # small chunks so progress has several parts
 core.CHUNK_SEC = 20
 app = server.create_app(st, jb, os.environ["MN_TOKEN"])
