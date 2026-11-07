@@ -305,6 +305,7 @@ function sidebar() {
   <button class="ni" data-go="#/pengaturan" aria-current="${act === 'set'}">${ic('gear')}Pengaturan</button>
   ${job}${pend}
   <div class="sfoot">${ic('lock', 'sm')}<span>Audio dan transkrip disimpan di Mac ini, di ${esc(homeDir(S.root || (st.output_root || '~/Documents/Meeting Report')))}</span></div>
+  ${st.version ? `<div class="sfoot" style="margin-top:4px">${ic('info', 'sm')}<span>Meeting Report versi ${esc(st.version)}</span></div>` : ''}
   </aside>`;
 }
 

@@ -61,7 +61,11 @@ if [[ -d "$OLD_APP" ]]; then
 fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# one version source: APP_VERSION in app/server.py (also shown in the app's sidebar)
+VERSION="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' "$SRC_DIR/app/server.py")"
+VERSION="${VERSION:-0}"
+
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -69,8 +73,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Meeting Report</string>
   <key>CFBundleDisplayName</key><string>Meeting Report</string>
   <key>CFBundleIdentifier</key><string>app.meetingreport.desktop</string>
-  <key>CFBundleVersion</key><string>2.1.2</string>
-  <key>CFBundleShortVersionString</key><string>2.1.2</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>MeetingNotes</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>

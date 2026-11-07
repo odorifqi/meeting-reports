@@ -27,7 +27,7 @@ import jobs as jobs_mod
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
