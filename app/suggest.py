@@ -12,6 +12,7 @@ import re
 
 import core
 import filters
+from i18n import tr
 
 WORD = re.compile(r"[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9'-]*")
 HONORIFICS = {"pak", "bu", "ibu", "bapak", "mas", "mbak", "bang", "kak"}
@@ -67,13 +68,13 @@ def local_suggestions(segments: list[dict], participants: list[dict], vocabulary
                 if r >= cutoff and gl[0] == t.lower()[0]:
                     seen.add(gl)
                     out.append({"seg_id": s["id"], "from": g, "to": t, "kind": "local",
-                                "reason": "Mirip istilah atau nama peserta"})
+                                "reason": tr("reason_similar")})
         # 2. the same word twice in a row ("yang yang")
         for m in re.finditer(r"(?<!\w)(\w{2,})\s+\1(?!\w)", text, re.I):
             if m.group(0).lower() not in seen:
                 seen.add(m.group(0).lower())
                 out.append({"seg_id": s["id"], "from": m.group(0), "to": m.group(1), "kind": "local",
-                            "reason": "Kata berulang"})
+                            "reason": tr("reason_repeat")})
         # 3. words Whisper was unsure about: no replacement, so the editor shows these
         #    only as "Tandai kata ragu" highlights, never as a suggestion card
         for w in (low_words or {}).get(s["id"], []):
@@ -82,7 +83,7 @@ def local_suggestions(segments: list[dict], participants: list[dict], vocabulary
                 continue
             seen.add(wl)
             out.append({"seg_id": s["id"], "from": w, "to": None, "kind": "local",
-                        "reason": "Whisper ragu dengan kata ini, coba dengarkan"})
+                        "reason": tr("reason_low_conf")})
     return out
 
 

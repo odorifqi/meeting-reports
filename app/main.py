@@ -22,6 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import core  # noqa: E402
+import i18n  # noqa: E402
 import server  # noqa: E402
 
 PORT = server.PORT
@@ -215,6 +216,23 @@ def macos_dark() -> bool:
     return out.strip().lower() == "dark"
 
 
+def macos_lang() -> str:
+    try:
+        out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"],
+                             capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.replace("(", " ").replace('"', " ").split()[0] if out.strip("() \n") else ""
+
+
+def launcher_lang() -> str:
+    """'id' or 'en', like the app: the language set in Settings, or macOS (Indonesian, else English)."""
+    lang = i18n.norm(core.load_config().get("ui_language"))
+    if lang:
+        return lang
+    return "id" if (macos_lang().lower().startswith("id")) else "en"
+
+
 def window_theme() -> str:
     """'light' or 'dark': the theme set in Settings, or the macOS appearance for 'system'."""
     theme = core.load_config().get("theme", "system")
@@ -230,9 +248,10 @@ def app_icon_svg() -> str:
         return ""
 
 
-def loader_html(theme: str) -> str:
+def loader_html(theme: str, lang: str = "id") -> str:
     c = THEME_COLORS[theme]
-    return f"""<!doctype html><html lang="id"><head><meta charset="utf-8"><title>Meeting Report</title><style>
+    t = {k: i18n.tr(k, lang) for k in ("loader_opening", "loader_failed", "loader_failed_hint")}
+    return f"""<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><title>Meeting Report</title><style>
 html,body{{height:100%;margin:0}}
 body{{background:{c['bg']};color:{c['muted']};font:13px/1.45 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;
 display:grid;place-items:center;-webkit-user-select:none;cursor:default}}
@@ -254,9 +273,9 @@ body.failed .wait{{display:none}} body.failed .err{{display:grid}}
 </style></head><body>
 <div class="box wait" role="status" aria-live="polite"><span class="logo" aria-hidden="true">{app_icon_svg()}</span>
 <span class="sp" aria-hidden="true"></span>
-<span id="status">Membuka Meeting Report…</span></div>
-<div class="box err" role="alert"><span class="ic" aria-hidden="true">!</span><b>Meeting Report tidak bisa menyala</b>
-<pre id="msg"></pre><small>Tutup jendela ini (⌘Q), atasi masalahnya, lalu buka Meeting Report lagi.</small></div>
+<span id="status">{t["loader_opening"]}</span></div>
+<div class="box err" role="alert"><span class="ic" aria-hidden="true">!</span><b>{t["loader_failed"]}</b>
+<pre id="msg"></pre><small>{t["loader_failed_hint"]}</small></div>
 <script>
 function setStatus(t){{document.getElementById('status').textContent=t}}
 function showError(t){{document.getElementById('msg').textContent=t;document.body.classList.add('failed')}}
@@ -272,12 +291,14 @@ def clear_webview_background(window) -> None:
         pass
 
 
-def ensure_server(status=lambda text: None) -> None:
-    """Make a healthy server of this version answer on PORT; RuntimeError with a message for the user if not."""
+def ensure_server(status=lambda key: None) -> None:
+    """Make a healthy server of this version answer on PORT; RuntimeError with a message for the user if not.
+
+    status() gets an i18n key for the loading screen."""
     if healthy():
         return
     if health():
-        status("Menyiapkan server…")
+        status("loader_preparing")
     stop_old_server()
     if healthy():
         return
@@ -286,7 +307,7 @@ def ensure_server(status=lambda text: None) -> None:
         port_file().unlink(missing_ok=True)
     free_port()
     if not healthy():
-        status("Menyalakan server…")
+        status("loader_starting")
         start_server()
 
 
@@ -327,8 +348,8 @@ def main() -> None:
         subprocess.run(["open", app_url()])
         return
 
-    theme = window_theme()
-    window = webview.create_window("Meeting Report", html=loader_html(theme), width=1180, height=780,
+    theme, lang = window_theme(), launcher_lang()
+    window = webview.create_window("Meeting Report", html=loader_html(theme, lang), width=1180, height=780,
                                    min_size=(920, 600), text_select=True,
                                    background_color=THEME_COLORS[theme]["bg"])
     window.events.before_show += clear_webview_background
@@ -342,8 +363,8 @@ def main() -> None:
     window.events.loaded += on_loaded
 
     def boot(win):
-        def status(text: str) -> None:
-            win.evaluate_js(f"setStatus({json.dumps(text)})")
+        def status(key: str) -> None:
+            win.evaluate_js(f"setStatus({json.dumps(i18n.tr(key, lang))})")
 
         try:
             ensure_server(status)

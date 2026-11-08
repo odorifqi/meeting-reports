@@ -1,4 +1,4 @@
-"""Interactive Transcript (v1.6): word times for a saved transcript version, and the Audio bersih time map."""
+"""Interactive Transcript (v1.6): word times for a saved transcript version, and the Silence removed audio time map."""
 from __future__ import annotations
 
 import bisect
@@ -126,7 +126,7 @@ def rows_from_regions(regions: list, total: float | None = None) -> list[list[fl
 
 
 def clean_map(saved: dict | None, regions: dict | None, meta: dict, has_clean_file: bool) -> dict | None:
-    """Time map for Audio bersih.m4a, or None when the meeting has no such file."""
+    """Time map for Silence removed.m4a, or None when the meeting has no such file."""
     if not has_clean_file:
         return None
     if saved and saved.get("rows"):

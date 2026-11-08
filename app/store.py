@@ -2,11 +2,11 @@
 (the folder keeps its v1 name; the app is now called Meeting Report).
 
 The folder stays the source of truth (no database). Next to the files a user
-already knows (Transkrip.txt, Ringkasan.md/.docx, Audio bersih.m4a) v1.1 keeps:
+already knows (Transcript.txt, Summary.md/.docx, Silence removed.m4a) v1.1 keeps:
 
     meeting.json            metadata, status, participants, summary list, send log
     draft.json              editor autosave (never creates a version)
-    versions/rev-0.json     Whisper output, never changed (also Transkrip asli.txt)
+    versions/rev-0.json     Whisper output, never changed (also Original transcript.txt)
     versions/rev-N.json     every save that really changed the content
     summaries/sum-N.md      every summary version, raw (tokens already restored)
 
@@ -26,6 +26,7 @@ import threading
 from pathlib import Path
 
 import core
+from i18n import tr
 
 META = "meeting.json"
 DRAFT = "draft.json"
@@ -35,6 +36,26 @@ REGIONS = "regions.json"     # speech regions of the recording (original timelin
 WORDS = "words.json"         # NOTE: outside the version files, so content hashes stay the same
 CLEAN_MAP = "clean_map.json"
 MIGRATED = ".folders-v2.1"   # marker: folders already renamed to "date - title"
+
+# Result files. Names are English in every UI language (v1.7); OLD_FILES are the names before v1.7.
+TRANSCRIPT = "Transcript.txt"
+ORIGINAL_TRANSCRIPT = "Original transcript.txt"
+SUMMARY_MD = "Summary.md"
+SUMMARY_DOCX = "Summary.docx"
+CLEAN_AUDIO = "Silence removed.m4a"
+ORIGINAL_AUDIO = "Original audio.m4a"
+OLD_FILES = {
+    TRANSCRIPT: "Transkrip.txt",
+    ORIGINAL_TRANSCRIPT: "Transkrip asli.txt",
+    SUMMARY_MD: "Ringkasan.md",
+    SUMMARY_DOCX: "Ringkasan.docx",
+    CLEAN_AUDIO: "Audio bersih.m4a",
+    ORIGINAL_AUDIO: "Audio rapat.m4a",
+}
+DROPPED_STEM = "Original recording"
+OLD_DROPPED_STEM = "Rekaman asli"
+V1_TRANSCRIPT = "Transkrip.txt"
+V1_SUMMARY = "Ringkasan.md"
 
 STATUSES = ("queued", "transcribing", "awaiting_review", "awaiting_confirmation",
             "summarizing", "done", "transcript_only", "failed")
@@ -109,19 +130,19 @@ def describe_changes(old: dict, new: dict) -> dict:
 def change_text(c: dict) -> str:
     out = []
     if c.get("added"):
-        out.append(f"{len(c['added'])} peserta ditambah")
+        out.append(tr("chg_added", n=len(c['added'])))
     if c.get("renamed"):
-        out.append(f"{len(c['renamed'])} nama peserta diubah")
+        out.append(tr("chg_renamed", n=len(c['renamed'])))
     if c.get("removed"):
-        out.append(f"{len(c['removed'])} peserta dihapus")
+        out.append(tr("chg_removed", n=len(c['removed'])))
     if c.get("tagged"):
-        out.append(f"{c['tagged']} segmen ditandai")
+        out.append(tr("chg_tagged", n=c['tagged']))
     if c.get("edited"):
-        out.append(f"{c['edited']} segmen diedit")
+        out.append(tr("chg_edited", n=c['edited']))
     if c.get("merged"):
-        out.append(f"{c['merged']} segmen digabung, dipecah, dihapus, atau ditambah")
+        out.append(tr("chg_merged", n=c['merged']))
     if c.get("secret"):
-        out.append(f"{c['secret']} tanda rahasia diubah")
+        out.append(tr("chg_secret", n=c['secret']))
     return ", ".join(out)
 
 
@@ -229,13 +250,51 @@ class Store:
             _write_json(folder / META, meta)
             return folder.name
 
+    def result_file(self, mid: str, name: str) -> Path:
+        """Path of a result file; a meeting the v1.7 rename could not reach keeps the old name."""
+        p = self.path(mid) / name
+        old = OLD_FILES.get(name)
+        if not p.exists() and old and (self.path(mid) / old).exists():
+            return self.path(mid) / old
+        return p
+
+    def rename_result_files(self) -> list[str]:
+        """Give result files their English names (v1.7). v1 meetings keep their v1 files.
+
+        A file that cannot be renamed now (for example, open in another app) keeps its
+        old name and is read through result_file(); the next start tries again."""
+        done = []
+        for mid in self.ids():
+            p = self.path(mid)
+            if not (p / META).exists() or (_read_json(p / META) or {}).get("v1"):
+                continue
+            for new, old in OLD_FILES.items():
+                if (p / old).exists() and not (p / new).exists():
+                    try:
+                        (p / old).rename(p / new)
+                        done.append(f"{mid}/{new}")
+                    except OSError:
+                        continue
+            for old in p.glob(OLD_DROPPED_STEM + ".*"):
+                new = p / (DROPPED_STEM + old.suffix)
+                if new.exists():
+                    continue
+                try:
+                    old.rename(new)
+                except OSError:
+                    continue
+                done.append(f"{mid}/{new.name}")
+                if (_read_json(p / META) or {}).get("source") == str(old):
+                    self.update(mid, source=str(new))
+        return done
+
     def ids(self) -> list[str]:
         if not self.root.is_dir():
             return []
         out = []
         for p in self.root.iterdir():
             if p.is_dir() and not p.name.startswith(".") and (
-                    (p / META).exists() or (p / "Transkrip.txt").exists()):
+                    (p / META).exists() or (p / V1_TRANSCRIPT).exists()):
                 out.append(p.name)
         return out
 
@@ -333,7 +392,7 @@ class Store:
             self.save_meta(mid, m)
             plain = core.format_transcript(segs, m["title"], meta={**m, "rev": None},
                                            participants=[])
-            (p / "Transkrip asli.txt").write_text(plain, encoding="utf-8")
+            (p / ORIGINAL_TRANSCRIPT).write_text(plain, encoding="utf-8")
 
     def latest(self, mid: str) -> dict:
         m = self.meta(mid)
@@ -381,9 +440,9 @@ class Store:
 
     def restore_version(self, mid: str, rev: int) -> dict:
         v = self.read_version(mid, rev)
-        name = "Asli Whisper" if int(rev) == 0 else f"versi {rev}"
+        name = tr("ver_whisper") if int(rev) == 0 else tr("ver_n", n=rev)
         return self.save_version(mid, v["segments"], v.get("participants") or self.meta(mid)["participants"],
-                                 source="restore", note=f"Dipulihkan dari {name}")
+                                 source="restore", note=tr("restored_from", name=name))
 
     def write_transcript_files(self, mid: str) -> None:
         m = self.meta(mid)
@@ -391,7 +450,7 @@ class Store:
         txt = core.format_transcript(v["segments"], m["title"],
                                      meta={**m, "rev": m.get("transcript_rev")},
                                      participants=v.get("participants") or [])
-        (self.path(mid) / "Transkrip.txt").write_text(txt, encoding="utf-8")
+        (self.path(mid) / TRANSCRIPT).write_text(txt, encoding="utf-8")
 
     def tag_counts(self, mid: str, m: dict | None = None) -> dict:
         m = m or self.meta(mid)
@@ -422,7 +481,8 @@ class Store:
 
     # ---------------------------------------------------------------- summaries
     def add_summary(self, mid: str, md: str, based_on_rev: int, model: str, context: str = "",
-                    redaction: dict | None = None, source: str = "claude", note: str | None = None) -> int:
+                    redaction: dict | None = None, source: str = "claude", note: str | None = None,
+                    lang: str | None = None) -> int:
         with self.lock:
             m = self.meta(mid)
             ver = len(m.get("summaries", [])) + 1
@@ -430,7 +490,8 @@ class Store:
             (self.path(mid) / SUMS / f"sum-{ver}.md").write_text(md, encoding="utf-8")
             m.setdefault("summaries", []).append({
                 "ver": ver, "based_on_rev": based_on_rev, "created": now_iso(), "model": model,
-                "context": context, "redaction": redaction or {}, "source": source, "note": note})
+                "context": context, "redaction": redaction or {}, "source": source, "note": note,
+                "lang": lang or "id"})
             m.pop("stale_changes", None)
             if self.is_stale(m):
                 base_v = self.read_version(mid, based_on_rev) if based_on_rev else {}
@@ -447,18 +508,23 @@ class Store:
         info = m["summaries"][int(ver) - 1]
         return self.add_summary(mid, self.read_summary(mid, ver), info["based_on_rev"], info["model"],
                                 info.get("context", ""), info.get("redaction"), source="restore",
-                                note=f"Dipulihkan dari ringkasan v{ver}")
+                                note=tr("restored_from_summary", ver=ver), lang=info.get("lang"))
 
     def stale_line(self, m: dict) -> str:
         s = m["summaries"][-1]
         when = m.get("saved_at")
+        if s.get("lang") == "en":
+            when_txt = f" on {core.fmt_date_short_en(dt.datetime.fromisoformat(when))}" if when else ""
+            return (f"⚠ This summary is from transcript version {s['based_on_rev']}. The transcript was "
+                    f"updated to version {m['transcript_rev']}{when_txt}. Open Meeting Report to update "
+                    f"the summary.")
         when_txt = f" pada {core.fmt_date_short(dt.datetime.fromisoformat(when))}" if when else ""
         return (f"⚠ Ringkasan ini dibuat dari transkrip versi {s['based_on_rev']}. Transkrip sudah "
                 f"diperbarui ke versi {m['transcript_rev']}{when_txt}. Buka Meeting Report untuk "
                 f"memperbarui ringkasan.")
 
     def write_summary_files(self, mid: str) -> None:
-        """Ringkasan.md/.docx = latest summary, with a ⚠ line on top while it is stale.
+        """Summary.md/.docx = latest summary, with a ⚠ line on top while it is stale.
 
         The summary body itself is never changed by this (approved rule)."""
         m = self.meta(mid)
@@ -467,9 +533,9 @@ class Store:
         body = self.read_summary(mid, m["summaries"][-1]["ver"])
         md = (self.stale_line(m) + "\n\n" + body) if self.is_stale(m) else body
         p = self.path(mid)
-        (p / "Ringkasan.md").write_text(md, encoding="utf-8")
+        (p / SUMMARY_MD).write_text(md, encoding="utf-8")
         try:
-            core.markdown_to_docx(md, p / "Ringkasan.docx")
+            core.markdown_to_docx(md, p / SUMMARY_DOCX)
         except Exception:  # docx is a convenience copy; md is the record
             pass
 
@@ -561,7 +627,7 @@ class Store:
 
     # ---------------------------------------------------------------- Interactive Transcript data (v1.6)
     def save_clean_map(self, mid: str, mapping: list, clean_sec: float) -> None:
-        """Rows (clean_start, orig_start, dur) of the Audio bersih.m4a written in this run."""
+        """Rows (clean_start, orig_start, dur) of the Silence removed.m4a written in this run."""
         d = self.path(mid) / VERS
         d.mkdir(parents=True, exist_ok=True)
         _write_json(d / CLEAN_MAP, {"created": now_iso(), "clean_sec": round(float(clean_sec), 3),
@@ -613,7 +679,7 @@ class Store:
     # ---------------------------------------------------------------- v1 migration
     def migrate_v1(self, mid: str) -> dict:
         p = self.path(mid)
-        tx = p / "Transkrip.txt"
+        tx = p / V1_TRANSCRIPT
         if not tx.exists():
             raise KeyError(mid)
         with self.lock:
@@ -629,7 +695,7 @@ class Store:
             _write_json(p / VERS / "rev-0.json", {"rev": 0, "created": created, "source": "v1",
                                                  "segments": segs, "participants": []})
             _write_json(p / VERS / "rev-1.json", {"rev": 1, "created": created, "source": "v1",
-                                                 "note": "Diimpor dari Meeting Notes v1", "hash": h,
+                                                 "note": tr("imported_v1"), "hash": h,
                                                  "segments": segs, "participants": [], "changes": {}})
             meta = {
                 "schema": 2, "id": p.name,
@@ -641,13 +707,13 @@ class Store:
                 "transcript_rev": 1, "rev_hash": h, "saved_at": created,
                 "claude_suggest": None, "summaries": [], "sends": [], "v1": True,
             }
-            rs = p / "Ringkasan.md"
+            rs = p / V1_SUMMARY
             if rs.exists():
                 (p / SUMS / "sum-1.md").write_text(rs.read_text(encoding="utf-8", errors="replace"),
                                                   encoding="utf-8")
                 meta["summaries"].append({"ver": 1, "based_on_rev": 1, "created": created,
                                           "model": core.CLAUDE_MODEL, "context": "", "redaction": {},
-                                          "source": "v1", "note": "Diimpor dari Meeting Notes v1"})
+                                          "source": "v1", "note": tr("imported_v1")})
                 meta["status"] = "done"
             _write_json(p / META, meta)
             return meta

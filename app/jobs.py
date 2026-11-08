@@ -19,8 +19,10 @@ from pathlib import Path
 
 import core
 import filters
+import i18n
 import store as store_mod
 import suggest
+from i18n import plural, tr
 
 PARTS = ".parts"
 
@@ -69,12 +71,39 @@ def _clock() -> str:
     return dt.datetime.now().strftime("%H:%M:%S")
 
 
-def postprocess_summary(md: str, meta: dict, version: dict, model: str, send: dict) -> str:
+# fixed report lines that the app adds, in the report language (v1.7)
+REPORT_TEXT = {
+    "id": {"title": "Laporan Rapat", "dur": "Durasi {d}", "tagged": "{a} dari {n} segmen ditandai",
+           "no_tags": "tanpa penanda peserta", "from_rev": "Dibuat dari transkrip versi {rev} · {tags}",
+           "other": "Catatan Lain", "none": ("tidak ada", "-"),
+           "ai": "Transkrip sudah melalui saran AI (✦ Disarankan AI: {a} diterima, {r} ditolak).",
+           "masked": "{mt} disamarkan sebelum dikirim dan dipulihkan di Mac ini; {wt} tidak dikirim.",
+           "masked_m": "{m} data sensitif", "masked_w": "{w} segmen rahasia",
+           "untagged": "{n} segmen belum ditandai pembicaranya. PIC dari segmen itu ditulis \"Belum ditandai\".",
+           "footer": "Dibuat {at} · {model} · dari transkrip versi {rev}"},
+    "en": {"title": "Meeting Report", "dur": "Length {d}",
+           "tagged": {"one": "{a} of {n} segment tagged", "other": "{a} of {n} segments tagged"},
+           "no_tags": "no speaker tags", "from_rev": "Made from transcript version {rev} · {tags}",
+           "other": "Other Notes", "none": ("none", "-"),
+           "ai": "The transcript went through AI suggestions (✦ Suggested by AI: {a} accepted, {r} rejected).",
+           "masked": "{mt} masked before sending and restored on this Mac; {wt} not sent.",
+           "masked_m": {"one": "{m} sensitive item was", "other": "{m} sensitive items were"},
+           "masked_w": {"one": "{w} confidential segment was", "other": "{w} confidential segments were"},
+           "untagged": {"one": "{n} segment has no speaker tag. The owner from that segment is written \"Not tagged\".",
+                        "other": "{n} segments have no speaker tag. Owners from those segments are written \"Not tagged\"."},
+           "footer": "Made {at} · {model} · from transcript version {rev}"},
+}
+
+
+def postprocess_summary(md: str, meta: dict, version: dict, model: str, send: dict, lang: str = "id") -> str:
     """Add the fixed header lines, notes and footer from the approved sample report."""
+    T = REPORT_TEXT.get(lang, REPORT_TEXT["id"])
+    fmt_date = core.fmt_date_en if lang == "en" else core.fmt_date_id
+    fmt_short = core.fmt_date_short_en if lang == "en" else core.fmt_date_short
     lines = md.strip().splitlines()
     start = next((i for i, l in enumerate(lines) if l.startswith("# ")), None)
     if start is None:
-        lines = [f"# {meta.get('title') or 'Laporan Rapat'}", ""] + lines
+        lines = [f"# {meta.get('title') or T['title']}", ""] + lines
         start = 0
     else:
         lines = lines[start:]
@@ -85,14 +114,14 @@ def postprocess_summary(md: str, meta: dict, version: dict, model: str, send: di
     rev = meta.get("transcript_rev")
     date = ""
     if meta.get("created"):
-        date = core.fmt_date_id(dt.datetime.fromisoformat(meta["created"]))
+        date = fmt_date(dt.datetime.fromisoformat(meta["created"]))
     if meta.get("duration_sec"):
-        date += f" · Durasi {core.fmt_dur(meta['duration_sec'])}"
-    tag_txt = (f"{tagged} dari {len(segs)} segmen ditandai" if parts else "tanpa penanda peserta")
+        date += " · " + T["dur"].format(d=core.fmt_dur(meta["duration_sec"]))
+    tag_txt = plural(T["tagged"], len(segs)).format(a=tagged, n=len(segs)) if parts else T["no_tags"]
     head = [lines[0], ""]
     if date:
         head += [date, ""]
-    head.append(f"_Dibuat dari transkrip versi {rev} · {tag_txt}_")
+    head.append("_" + T["from_rev"].format(rev=rev, tags=tag_txt) + "_")
     body = lines[1:]
     while body and not body[0].strip():
         body = body[1:]
@@ -101,32 +130,31 @@ def postprocess_summary(md: str, meta: dict, version: dict, model: str, send: di
     notes = []
     cs = meta.get("claude_suggest")
     if cs:
-        notes.append(f"- Transkrip sudah melalui saran AI (✦ Disarankan AI: {cs.get('accepted', 0)} "
-                     f"diterima, {cs.get('rejected', 0)} ditolak).")
+        notes.append("- " + T["ai"].format(a=cs.get("accepted", 0), r=cs.get("rejected", 0)))
     if send.get("masked") or send.get("withheld"):
-        notes.append(f"- {send.get('masked', 0)} data sensitif disamarkan sebelum dikirim dan dipulihkan di Mac ini; "
-                     f"{send.get('withheld', 0)} segmen rahasia tidak dikirim.")
+        m, w = send.get("masked", 0), send.get("withheld", 0)
+        notes.append("- " + T["masked"].format(mt=plural(T["masked_m"], m).format(m=m),
+                                               wt=plural(T["masked_w"], w).format(w=w)))
     if parts and tagged < len(segs):
-        notes.append(f"- {len(segs) - tagged} segmen belum ditandai pembicaranya. PIC dari segmen itu ditulis "
-                     f"\"Belum ditandai\".")
+        notes.append("- " + plural(T["untagged"], len(segs) - tagged).format(n=len(segs) - tagged))
     if notes:
-        idx = next((i for i, l in enumerate(lines) if l.strip().lower() == "## catatan lain"), None)
+        idx = next((i for i, l in enumerate(lines) if l.strip().lower() == "## " + T["other"].lower()), None)
         if idx is None:
-            lines += ["", "## Catatan Lain"] + notes
+            lines += ["", "## " + T["other"]] + notes
         else:
             end = next((j for j in range(idx + 1, len(lines)) if lines[j].startswith("## ")
                         or lines[j].strip() == "---"), len(lines))
             while end > idx + 1 and not lines[end - 1].strip():
                 end -= 1
             existing = [l for l in lines[idx + 1:end] if l.strip()]
-            if existing and all(l.strip("- ").lower().startswith(("tidak ada", "-")) for l in existing):
+            if existing and all(l.strip("- ").lower().startswith(T["none"]) for l in existing):
                 lines[idx + 1:end] = notes
             else:
                 lines[end:end] = notes
     # drop any footer the model wrote itself, then add ours
     while lines and (not lines[-1].strip() or lines[-1].strip() == "---"):
         lines.pop()
-    lines += ["", "---", f"_Dibuat {core.fmt_date_short(dt.datetime.now())} · {model} · dari transkrip versi {rev}_"]
+    lines += ["", "---", "_" + T["footer"].format(at=fmt_short(dt.datetime.now()), model=model, rev=rev) + "_"]
     return "\n".join(lines) + "\n"
 
 
@@ -181,15 +209,14 @@ class Jobs:
                 continue
             if m.get("status") in ("queued", "transcribing"):
                 self.store.update(mid, status="failed", progress=None,
-                                  error={"message": "Aplikasi ditutup saat transkripsi berjalan. "
-                                                    "Bagian yang sudah selesai disimpan; lanjutkan dari sana.",
+                                  error={"message": tr("closed_during_job"),
                                          "chunk": (m.get("progress") or {}).get("chunk")})
             elif m.get("status") == "summarizing":
                 self.store.update(mid, status=m.get("prev_status") or "transcript_only", progress=None,
                                   summary_error="Aplikasi ditutup saat ringkasan dibuat. Coba lagi.")
             elif (m.get("suggest_job") or {}).get("state") in ("queued", "running"):
                 self.store.update(mid, suggest_job={"state": "failed",
-                                                    "error": "Aplikasi ditutup saat saran AI dibuat. Coba lagi."})
+                                                    "error": tr("closed_during_suggest")})
             elif m.get("suggest_job"):
                 self.store.update(mid, suggest_job=None)
 
@@ -248,23 +275,24 @@ class Jobs:
         try:
             src = Path(m["source"])
             if not src.exists():
-                raise RuntimeError(f"File rekaman tidak ditemukan: {src.name}")
+                raise RuntimeError(tr("recording_not_found_named", name=src.name))
             self._progress(mid, phase="decode", pct=0, chunk=0, chunks=0, eta=None)
-            self._log(mid, "Membaca rekaman")
+            self._log(mid, tr("log_reading"))
             free = core.disk_free(folder)
             if free is not None and free < core.disk_need(m.get("duration_sec"), s.get("video")):
-                raise RuntimeError("Ruang disk tidak cukup untuk menyimpan hasil. Kosongkan sedikit ruang lalu coba lagi.")
+                raise RuntimeError(tr("disk_full_results"))
             audio = load_track(self.load_audio, str(src), s.get("audio_track"))
             dur = len(audio) / core.SR
-            if s.get("video") and not (folder / "Audio rapat.m4a").exists():
+            orig_audio = st.result_file(mid, store_mod.ORIGINAL_AUDIO)
+            if s.get("video") and not orig_audio.exists():
                 # sound of the video for playback in the editor (timestamps = original)
                 try:
-                    self.save_m4a(audio, folder / "Audio rapat.m4a")
-                    self._log(mid, "Suara video disimpan sebagai Audio rapat.m4a")
+                    self.save_m4a(audio, orig_audio)
+                    self._log(mid, tr("log_video_audio_saved", name=orig_audio.name))
                 except Exception as exc:  # noqa: BLE001 - playback falls back to the video
-                    self._log(mid, f"Audio rapat gagal disimpan ({type(exc).__name__})")
+                    self._log(mid, tr("log_video_audio_failed", name=orig_audio.name, err=type(exc).__name__))
             clean = core.clean_audio(audio, s.get("remove_silence", True), cfg.get("min_silence_sec", 2.0))
-            self._log(mid, f"Durasi {core.fmt_dur(dur)}, setelah buang hening {core.fmt_dur(clean.clean_sec)}")
+            self._log(mid, tr("log_durations", dur=core.fmt_dur(dur), clean=core.fmt_dur(clean.clean_sec)))
             st.update(mid, duration_sec=round(dur, 1), clean_sec=round(clean.clean_sec, 1))
             # where someone speaks, used by the editor to point at skipped stretches
             regions = clean.regions if s.get("remove_silence", True) else \
@@ -272,22 +300,22 @@ class Jobs:
             st.save_regions(mid, regions, dur)
             gap_sec = float(cfg.get("gap_fill_sec", 3.0) or 0)
             if s.get("save_clean_audio", True) and s.get("remove_silence", True) and \
-                    not (folder / "Audio bersih.m4a").exists():
+                    not st.result_file(mid, store_mod.CLEAN_AUDIO).exists():
                 try:
-                    self.save_m4a(clean.audio, folder / "Audio bersih.m4a")
+                    self.save_m4a(clean.audio, folder / store_mod.CLEAN_AUDIO)
                     # NOTE: the map describes this file, so it is written only together with it
                     st.save_clean_map(mid, clean.mapping, clean.clean_sec)
-                    self._log(mid, "Audio bersih disimpan")
+                    self._log(mid, tr("log_clean_saved", name=store_mod.CLEAN_AUDIO))
                 except Exception as exc:  # noqa: BLE001 - optional output
-                    self._log(mid, f"Audio bersih gagal disimpan ({type(exc).__name__})")
+                    self._log(mid, tr("log_clean_failed", name=store_mod.CLEAN_AUDIO, err=type(exc).__name__))
             if self.model_ready(repo) is False:
                 # first use of this model: download it before the first chunk so the
                 # progress screen says why nothing moves for a while
                 self._progress(mid, phase="download", pct=0, chunk=0, chunks=0, eta=None)
-                self._log(mid, f"Mengunduh model {wm['name']} (±{wm['size_gb']:.1f} GB, sekali saja)".replace(".", ",", 1))
+                self._log(mid, tr("log_model_download", name=wm['name'], gb=i18n.dec(wm['size_gb'])))
                 self.download_model(repo)
-                self._log(mid, f"Model {wm['name']} siap")
-            self._log(mid, f"Model transkripsi: {wm['label']} ({wm['name']})")
+                self._log(mid, tr("log_model_ready", name=wm['name']))
+            self._log(mid, tr("log_model", label=core.whisper_label(wm.get('key')), name=wm['name']))
             chunks = core.chunk_bounds(clean)
             n = len(chunks)
             names = [p["name"] for p in m.get("participants") or []]
@@ -300,7 +328,7 @@ class Jobs:
                 length = (b - a) / core.SR
                 if part.exists():
                     segments.extend(json.loads(part.read_text(encoding="utf-8")))
-                    self._log(mid, f"Bagian {chunk_i + 1} dari {n} sudah ada, dilewati")
+                    self._log(mid, tr("log_part_skip", i=chunk_i + 1, n=n))
                     continue
                 if mid in self.cancelled:
                     raise core.Cancelled()
@@ -308,7 +336,7 @@ class Jobs:
                 eta = round(spent / done_audio * remaining) if done_audio else None
                 self._progress(mid, phase="transcribe", pct=round(100 * chunk_i / n), chunk=chunk_i + 1,
                                chunks=n, eta=eta)
-                self._log(mid, f"Mentranskrip bagian {chunk_i + 1} dari {n}")
+                self._log(mid, tr("log_part_start", i=chunk_i + 1, n=n))
                 t0 = time.time()
                 wc = cfg.get("word_confidence", True)
                 with self.whisper_lock:
@@ -322,38 +350,39 @@ class Jobs:
                         for ga, gb, found in report:
                             oa = clean.to_original(a / core.SR + ga)
                             ob = clean.to_original(a / core.SR + gb)
-                            self._log(mid, f"Celah {core.fmt_ts(oa)}–{core.fmt_ts(ob)} diisi ulang ({found} segmen)")
+                            self._log(mid, tr("log_gap_filled", a=core.fmt_ts(oa), b=core.fmt_ts(ob), n=found))
                 placed = core.place_chunk(clean, a, segs)
                 part.write_text(json.dumps(placed, ensure_ascii=False), encoding="utf-8")
                 segments.extend(placed)
                 spent += time.time() - t0
                 done_audio += length
-                self._log(mid, f"Bagian {chunk_i + 1} selesai ({len(placed)} segmen, {round(time.time() - t0)} detik)")
+                self._log(mid, tr("log_part_done", i=chunk_i + 1, n=len(placed), secs=round(time.time() - t0)))
             segments = core.dedupe(segments)
             self._progress(mid, phase="finish", pct=100, chunk=n, chunks=n, eta=0)
             st.save_whisper(mid, segments, {"progress": None, "error": None,
                                             "whisper_model": {"key": wm["key"], "name": wm["name"], "repo": repo},
                                             "duration_sec": round(dur, 1), "clean_sec": round(clean.clean_sec, 1)})
             shutil.rmtree(parts_dir, ignore_errors=True)
-            self._log(mid, f"Transkripsi selesai: {len(segments)} segmen. Siap ditinjau.")
+            self._log(mid, tr("log_transcribed", n=len(segments)))
             self._emit(mid, kind="status", status="awaiting_review")
         except core.Cancelled:
             st.update(mid, status="failed", progress=None,
-                      error={"message": "Dibatalkan. Bagian yang sudah selesai disimpan.", "chunk": chunk_i + 1,
+                      error={"message": tr("cancelled"), "chunk": chunk_i + 1,
                              "chunks": n, "cancelled": True})
-            self._log(mid, "Dibatalkan oleh pengguna")
+            self._log(mid, tr("log_cancelled"))
             self._emit(mid, kind="status", status="failed")
         except Exception as exc:  # noqa: BLE001
             msg = str(exc) or type(exc).__name__
             st.update(mid, status="failed", progress=None,
                       error={"message": msg, "chunk": chunk_i + 1 if n else None, "chunks": n or None})
-            self._log(mid, f"Gagal: {type(exc).__name__}")
+            self._log(mid, tr("log_failed", err=type(exc).__name__))
             self._emit(mid, kind="status", status="failed")
         finally:
             self.cancelled.discard(mid)
 
     # ---------------------------------------------------------------- summary
-    def _job_summary(self, mid: str, context: str = "", model: str | None = None, note: str | None = None) -> None:
+    def _job_summary(self, mid: str, context: str = "", model: str | None = None, note: str | None = None,
+                     report_language: str | None = None) -> None:
         st = self.store
         m = st.meta(mid)
         prev = m.get("status") if m.get("status") != "summarizing" else (m.get("prev_status") or "transcript_only")
@@ -362,7 +391,10 @@ class Jobs:
         pname = core.provider_name(cfg, provider)
         model = model or core.provider_model(cfg, provider)
         v = st.latest(mid)
-        send = filters.build_send(m, v, cfg, context)
+        lang = core.report_lang(m, cfg, report_language)
+        if report_language in core.REPORT_LANGS:
+            st.update(mid, report_language=report_language)
+        send = filters.build_send(m, v, cfg, context, lang=lang)
         st.update(mid, status="summarizing", prev_status=prev, summary_error=None)
         self._progress(mid, phase="send", masked=send["masked"], withheld=send["withheld"], words=send["words"],
                        model=model)
@@ -370,39 +402,37 @@ class Jobs:
         try:
             key = self.api_key(provider)
             if not key:
-                raise RuntimeError(f"API key {pname} belum diisi. Buka Pengaturan.")
-            user = f"<info_rapat>\n{send['header']}\n</info_rapat>\n\n<transkrip>\n{send['transcript']}\n</transkrip>"
-            if send["context"]:
-                user += f"\n\nKonteks tambahan dari pengguna: {send['context']}"
+                raise RuntimeError(tr("key_missing_open_settings", provider=pname))
+            user = core.summary_user(send["header"], send["transcript"], send["context"], lang)
             st.log_send(mid, {"kind": "summary", "provider": provider, "model": model, "words": send["words"],
                               "masked": send["masked"], "withheld": send["withheld"], "rev": m.get("transcript_rev")})
             host = core._host(core.provider_url(cfg, provider)) if provider != "anthropic" else "api.anthropic.com"
             n_chars = f"{len(user):,}".replace(",", ".")
-            self._log(mid, f"Kirim ringkasan ke {pname} ({host}), model {model}, {n_chars} karakter")
+            self._log(mid, tr("log_send_summary", provider=pname, host=host, model=model, n=n_chars))
             t0 = time.time()
             try:
-                raw = self.claude(core.SUMMARY_SYSTEM, user, key, model, 8000)
+                raw = self.claude(core.summary_system(lang), user, key, model, 8000)
             except Exception as exc:
                 kind = getattr(exc, "kind", type(exc).__name__)
                 status = getattr(exc, "status", None)
-                self._log(mid, f"Jawaban gagal setelah {round(time.time() - t0)} detik: {kind}"
+                self._log(mid, tr("log_answer_failed", secs=round(time.time() - t0), kind=kind)
                                + (f" HTTP {status}" if status else ""))
                 raise
-            self._log(mid, f"Jawaban diterima dalam {round(time.time() - t0)} detik")
+            self._log(mid, tr("log_answer_ok", secs=round(time.time() - t0)))
             self._progress(mid, phase="restore", masked=send["masked"], withheld=send["withheld"],
                            words=send["words"], model=model)
             md = filters.restore(raw, send["tokens"])
-            md = postprocess_summary(md, st.meta(mid), v, model, send)
+            md = postprocess_summary(md, st.meta(mid), v, model, send, lang)
             ver = st.add_summary(mid, md, m.get("transcript_rev"), model, context,
                                  {"counts": send["counts"], "withheld": send["withheld"]}, note=note,
-                                 source=provider)
+                                 source=provider, lang=lang)
             st.update(mid, status="done", progress=None, prev_status=None)
-            self._log(mid, f"Ringkasan versi {ver} dibuat ({model})")
+            self._log(mid, tr("log_summary_done", ver=ver, model=model))
             self._emit(mid, kind="status", status="done", summary=ver)
         except Exception as exc:  # noqa: BLE001
             st.update(mid, status=prev, progress=None, prev_status=None,
                       summary_error=_friendly(exc, pname))
-            self._log(mid, f"Ringkasan gagal: {type(exc).__name__}")
+            self._log(mid, tr("log_summary_failed", err=type(exc).__name__))
             self._emit(mid, kind="status", status=prev, error=True)
 
     # ---------------------------------------------------------------- AI suggestions
@@ -426,7 +456,7 @@ class Jobs:
             step(masked=send["masked"], withheld=send["withheld"], words=send["words"])
             key = self.api_key(provider)
             if not key:
-                raise RuntimeError(f"API key {pname} belum diisi. Buka Pengaturan.")
+                raise RuntimeError(tr("key_missing_open_settings", provider=pname))
             vocab = (m.get("settings") or {}).get("vocabulary", "") or cfg.get("vocabulary", "")
             items, send = suggest.claude_suggestions(m, v, cfg, key, model, vocab, call=self.claude, send=send,
                                                      on_reply=lambda: step(phase="match"))
@@ -443,46 +473,42 @@ class Jobs:
 def _friendly(exc: Exception, provider: str = "Anthropic") -> str:
     name = type(exc).__name__
     msg = str(exc)
+    ollama = provider in {tr("prov_ollama_short", lang=x) for x in i18n.LANGS}
     if isinstance(exc, core.AIError) and exc.kind != "other":
         where = f" ({exc.host})" if exc.host else ""
-        said = f" Pesan server: \u201c{exc.detail}\u201d" if exc.detail and exc.kind == "http" else ""
+        said = tr("ai_said", detail=exc.detail) if exc.detail and exc.kind == "http" else ""
         if exc.kind == "config":
             return msg
         if exc.kind == "timeout":
-            return (f"{provider}{where} tidak mengirim jawaban dalam {core.AI_TIMEOUT // 60} menit. "
-                    "Server mungkin sedang lambat atau model terlalu berat untuk transkrip sepanjang ini. "
-                    "Coba lagi, atau pilih model yang lebih cepat.")
+            return tr("ai_timeout", provider=provider, where=where, mins=core.AI_TIMEOUT // 60)
         if exc.kind == "network":
-            if provider == "Ollama lokal":
-                return "Ollama tidak berjalan di Mac ini. Buka Ollama, lalu coba lagi."
-            return (f"Koneksi ke {provider}{where} terputus atau gagal dibuka ({exc.detail or 'jaringan'}). "
-                    "Periksa internet dan alamat server di Pengaturan.")
+            if ollama:
+                return tr("ai_ollama_down")
+            return tr("ai_network", provider=provider, where=where, detail=exc.detail or tr("ai_network_generic"))
         if exc.kind == "empty":
-            return f"{provider}{where} menjawab kosong. Periksa nama model di Pengaturan."
+            return tr("ai_empty", provider=provider, where=where)
         s = exc.status
         if s in (401, 403):
-            return f"API key ditolak {provider} (HTTP {s}).{said}"
+            return tr("ai_key_rejected", provider=provider, status=s, said=said)
         if s == 404:
-            return (f"Alamat atau model tidak ditemukan di {provider}{where} (HTTP 404). Isi alamat dasar saja, "
-                    f"misalnya https://server/v1, dan periksa nama model.{said}")
+            return tr("ai_not_found", provider=provider, where=where, said=said)
         if s == 429:
-            return f"Batas pemakaian {provider} tercapai (HTTP 429). Coba lagi beberapa menit lagi.{said}"
+            return tr("ai_rate_limit", provider=provider, said=said)
         if s in (408, 504, 524):
-            return (f"Server {provider}{where} kehabisan waktu menunggu model (HTTP {s}). "
-                    f"Coba lagi atau pilih model yang lebih cepat.{said}")
+            return tr("ai_gateway_timeout", provider=provider, where=where, status=s, said=said)
         if s and s >= 500:
-            return f"Server {provider}{where} sedang bermasalah (HTTP {s}). Coba lagi.{said}"
-        return f"{provider}{where} menolak permintaan" + (f" (HTTP {s})." if s else ".") + said
+            return tr("ai_server_error", provider=provider, where=where, status=s, said=said)
+        return tr("ai_refused", provider=provider, where=where, status=f" (HTTP {s})" if s else "", said=said)
     if "Authentication" in name or "401" in msg or "403" in msg:
-        return f"API key ditolak {provider}. Periksa di Pengaturan."
+        return tr("ai_key_rejected_plain", provider=provider)
     if "RateLimit" in name or "429" in msg:
-        return "Batas pemakaian API tercapai. Coba lagi beberapa menit lagi."
+        return tr("ai_rate_limit_plain")
     if "Connection" in name or "Timeout" in name or msg.startswith("Connection"):
-        if provider == "Ollama lokal":
-            return "Ollama tidak berjalan di Mac ini. Buka Ollama, lalu coba lagi."
-        return f"Tidak bisa terhubung ke {provider}. Periksa koneksi internet."
+        if ollama:
+            return tr("ai_ollama_down")
+        return tr("ai_no_connection", provider=provider)
     if "Overloaded" in msg or "529" in msg or "503" in msg:
-        return f"Server {provider} sedang sibuk. Coba lagi."
+        return tr("ai_busy", provider=provider)
     if "404" in msg:
-        return f"Model tidak ditemukan di {provider}. Periksa nama model di Pengaturan."
+        return tr("ai_model_not_found", provider=provider)
     return msg or name

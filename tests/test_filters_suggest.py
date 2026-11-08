@@ -88,3 +88,20 @@ def test_claude_suggestions_restore_and_validate():
     assert "0331" not in sent["user"]
     assert [(i["from"], i["to"]) for i in items] == [("rek 0331 0100 0412", "rekening 0331 0100 0412"),
                                                      ("cabang", "Cabang")]
+
+
+def test_english_tokens_and_singular_segment():
+    r = filters.Redactor(None, ["PT Sinar Tani"], "en")
+    out = r.apply("PT Sinar Tani, account 0331 0100 0412, phone 0812-3456-7890, NIK 3174012345670001")
+    for tok in ("‹NAME_1›", "‹ACCOUNT_1›", "‹PHONE_1›", "‹ID_1›"):
+        assert tok in out, out
+    assert filters.restore(out, r.tokens).startswith("PT Sinar Tani, account 0331 0100 0412")
+    meta = {"title": "KUR"}
+    ver = {"segments": [{"id": "s1", "start": 1, "end": 2, "text": "Hello", "speaker_id": "p1"},
+                        {"id": "s2", "start": 3, "end": 4, "text": "Hi", "speaker_id": "p2"},
+                        {"id": "s3", "start": 5, "end": 6, "text": "Yes", "speaker_id": "p2"}],
+           "participants": [{"id": "p1", "name": "Sari"}, {"id": "p2", "name": "Andi"}]}
+    head = filters.build_send(meta, ver, {"redact": None, "sensitive_words": ""}, lang="en")["header"]
+    assert "- Sari | – | 1 segment\n" in head and "- Andi | – | 2 segments" in head
+    head_id = filters.build_send(meta, ver, {"redact": None, "sensitive_words": ""})["header"]
+    assert "- Sari | – | 1 segmen\n" in head_id

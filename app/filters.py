@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 import core
+from i18n import plural
 
 CATEGORIES = {
     "rekening": "Nomor rekening",
@@ -19,9 +20,26 @@ CATEGORIES = {
     "npwp": "NPWP",
     "email": "Email",
 }
-TOKEN_NAME = {"rekening": "REKENING", "nik": "NIK", "hp": "HP", "kartu": "KARTU",
-              "npwp": "NPWP", "email": "EMAIL", "kata": "NAMA"}
+# NOTE: TOKEN_RE matches letters only, so a token name must not contain "_".
+TOKEN_NAME = {
+    "id": {"rekening": "REKENING", "nik": "NIK", "hp": "HP", "kartu": "KARTU",
+           "npwp": "NPWP", "email": "EMAIL", "kata": "NAMA"},
+    "en": {"rekening": "ACCOUNT", "nik": "ID", "hp": "PHONE", "kartu": "CARD",
+           "npwp": "TAXID", "email": "EMAIL", "kata": "NAME"},
+}
 SECRET_LINE = "(segmen rahasia, tidak dikirim)"
+# what goes to the AI around the transcript, in the report language (v1.7)
+SEND_TEXT = {
+    "id": {"secret": SECRET_LINE, "untagged": "(Belum ditandai)", "title": "Judul", "date": "Tanggal",
+           "dur": "Durasi rekaman", "parts": "Daftar peserta ({n}):", "segs": "segmen",
+           "tagged": "Segmen ditandai: {a} dari {n}; belum ditandai: {b}",
+           "no_parts": "Daftar peserta: tidak diisi (tidak ada penanda suara)"},
+    "en": {"secret": "(confidential segment, not sent)", "untagged": "(Not tagged)", "title": "Title",
+           "date": "Date", "dur": "Recording length", "parts": "Participant list ({n}):",
+           "segs": {"one": "segment", "other": "segments"},
+           "tagged": "Tagged segments: {a} of {n}; not tagged: {b}",
+           "no_parts": "Participant list: empty (no voice tags)"},
+}
 TOKEN_RE = re.compile(r"‹([A-Z]+)_(\d+)›")
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
@@ -89,7 +107,8 @@ def split_words(text: str) -> list[str]:
 class Redactor:
     """Holds the token map for one send so equal values get the same token."""
 
-    def __init__(self, enabled: dict | None = None, words: list[str] | None = None):
+    def __init__(self, enabled: dict | None = None, words: list[str] | None = None, lang: str = "id"):
+        self.names = TOKEN_NAME.get(lang, TOKEN_NAME["id"])
         self.enabled = {k: True for k in CATEGORIES} if enabled is None else dict(enabled)
         self.words = sorted({w for w in (words or []) if w.strip()}, key=len, reverse=True)
         self.tokens: dict[str, str] = {}      # token -> original
@@ -101,7 +120,7 @@ class Redactor:
         tok = self._by_value.get(key)
         if tok is None:
             n = sum(1 for k in self._by_value if k[0] == cat) + 1
-            tok = f"‹{TOKEN_NAME[cat]}_{n}›"
+            tok = f"‹{self.names[cat]}_{n}›"
             self._by_value[key] = tok
             self.tokens[tok] = value
         self.counts[cat] = self.counts.get(cat, 0) + 1
@@ -141,7 +160,8 @@ def restore(text: str, tokens: dict[str, str]) -> str:
 
 
 def segment_lines(segments: list[dict], participants: list[dict], red: Redactor,
-                  with_ids: bool = False) -> tuple[list[str], int]:
+                  with_ids: bool = False, lang: str = "id") -> tuple[list[str], int]:
+    T = SEND_TEXT.get(lang, SEND_TEXT["id"])
     names = {p["id"]: p["name"] for p in participants}
     lines, withheld = [], 0
     for s in segments:
@@ -150,7 +170,7 @@ def segment_lines(segments: list[dict], participants: list[dict], red: Redactor,
             ts = f"[{s['id']}] {ts}"
         if s.get("secret"):
             withheld += 1
-            body = SECRET_LINE
+            body = T["secret"]
         else:
             body = red.apply(s["text"])
         if not participants:
@@ -158,40 +178,45 @@ def segment_lines(segments: list[dict], participants: list[dict], red: Redactor,
         elif s.get("speaker_id") in names:
             lines.append(f"{ts} {red.apply(names[s['speaker_id']])}: {body}")
         else:
-            lines.append(f"{ts} (Belum ditandai): {body}")
+            lines.append(f"{ts} {T['untagged']}: {body}")
     return lines, withheld
 
 
-def header_text(meta: dict, segments: list[dict], participants: list[dict], red: Redactor) -> str:
+def header_text(meta: dict, segments: list[dict], participants: list[dict], red: Redactor,
+                lang: str = "id") -> str:
     import datetime as dt
-    L = [f"Judul: {red.apply(meta.get('title') or '')}"]
+    T = SEND_TEXT.get(lang, SEND_TEXT["id"])
+    fmt_date = core.fmt_date_en if lang == "en" else core.fmt_date_id
+    L = [f"{T['title']}: {red.apply(meta.get('title') or '')}"]
     if meta.get("created"):
-        L.append(f"Tanggal: {core.fmt_date_id(dt.datetime.fromisoformat(meta['created']))}")
+        L.append(f"{T['date']}: {fmt_date(dt.datetime.fromisoformat(meta['created']))}")
     if meta.get("duration_sec"):
-        L.append(f"Durasi rekaman: {core.fmt_dur(meta['duration_sec'])}")
+        L.append(f"{T['dur']}: {core.fmt_dur(meta['duration_sec'])}")
     total = len(segments)
     if participants:
         per: dict[str, int] = {}
         for s in segments:
             per[s.get("speaker_id")] = per.get(s.get("speaker_id"), 0) + 1
-        L.append(f"Daftar peserta ({len(participants)}):")
+        L.append(T["parts"].format(n=len(participants)))
         for p in participants:
             role = f" | {red.apply(p['role'])}" if p.get("role") else " | –"
-            L.append(f"- {red.apply(p['name'])}{role} | {per.get(p['id'], 0)} segmen")
+            n = per.get(p["id"], 0)
+            L.append(f"- {red.apply(p['name'])}{role} | {n} {plural(T['segs'], n)}")
         tagged = sum(per.get(p["id"], 0) for p in participants)
-        L.append(f"Segmen ditandai: {tagged} dari {total}; belum ditandai: {total - tagged}")
+        L.append(T["tagged"].format(a=tagged, n=total, b=total - tagged))
     else:
-        L.append("Daftar peserta: tidak diisi (tidak ada penanda suara)")
+        L.append(T["no_parts"])
     return "\n".join(L)
 
 
-def build_send(meta: dict, version: dict, cfg: dict, context: str = "", with_ids: bool = False) -> dict:
+def build_send(meta: dict, version: dict, cfg: dict, context: str = "", with_ids: bool = False,
+               lang: str = "id") -> dict:
     """Everything that would be sent, already filtered, plus what the preview shows."""
-    red = Redactor(cfg.get("redact"), split_words(cfg.get("sensitive_words", "")))
+    red = Redactor(cfg.get("redact"), split_words(cfg.get("sensitive_words", "")), lang)
     segs = version.get("segments", [])
     parts = version.get("participants") or []
-    header = header_text(meta, segs, parts, red)
-    lines, withheld = segment_lines(segs, parts, red, with_ids)
+    header = header_text(meta, segs, parts, red, lang)
+    lines, withheld = segment_lines(segs, parts, red, with_ids, lang)
     ctx = red.apply(context.strip()) if context else ""
     transcript = "\n".join(lines)
     words = len(re.findall(r"\S+", header + " " + transcript + " " + ctx))
@@ -204,6 +229,7 @@ def build_send(meta: dict, version: dict, cfg: dict, context: str = "", with_ids
         "masked": red.masked,
         "withheld": withheld,
         "words": words,
+        "lang": lang,
     }
 
 

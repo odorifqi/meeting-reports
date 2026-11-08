@@ -35,6 +35,21 @@ def test_docx_bold_with_italic_inside(tmp_path):
     assert "*" not in "".join(t for t, _, _ in runs)
 
 
+def test_report_notes_use_singular_for_one():
+    import jobs
+    ver = {"segments": [{"id": "s1", "start": 1, "end": 2, "text": "a", "speaker_id": "p1"},
+                        {"id": "s2", "start": 3, "end": 4, "text": "b", "speaker_id": None}],
+           "participants": [{"id": "p1", "name": "Sari"}]}
+    md = jobs.postprocess_summary("# Report\n\nBody", {"title": "Report"}, ver, "m",
+                                  {"masked": 1, "withheld": 1}, "en")
+    assert "1 sensitive item was masked before sending and restored on this Mac; " \
+           "1 confidential segment was not sent." in md
+    assert "1 segment has no speaker tag." in md
+    md_id = jobs.postprocess_summary("# Laporan\n\nIsi", {"title": "Laporan"}, ver, "m",
+                                     {"masked": 2, "withheld": 1}, "id")
+    assert "2 data sensitif disamarkan sebelum dikirim dan dipulihkan di Mac ini; 1 segmen rahasia tidak dikirim." in md_id
+
+
 def test_chunk_bounds_reads_chunk_sec_when_called(monkeypatch):
     import numpy as np
     clean = core.CleanResult(audio=np.zeros(core.SR * 100, dtype=np.float32), regions=[(0.0, 100.0)],

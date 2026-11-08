@@ -21,6 +21,9 @@ from pathlib import Path
 
 import numpy as np
 
+import i18n
+from i18n import tr
+
 SR = 16000            # Whisper works at 16 kHz mono
 FRAME = 0.03          # energy analysis window, seconds
 CHUNK_SEC = 600       # transcribe in ~10 minute chunks so the UI can show progress
@@ -55,6 +58,10 @@ DEFAULT_CONFIG = {
     "language": "id",
     "vocabulary": "",
     "theme": "system",
+    # "" follows the macOS language; an install from before v1.7 keeps Indonesian (load_config)
+    "ui_language": "",
+    # report (summary) language: "" = same as the transcript, or "id" / "en"
+    "report_language": "",
     # F15: categories masked before any text leaves the Mac
     "redact": {"rekening": True, "nik": True, "hp": True, "kartu": True, "npwp": True, "email": True},
     "sensitive_words": "",
@@ -73,6 +80,7 @@ def load_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))
+        saved.setdefault("ui_language", "id")
         redact = {**cfg["redact"], **(saved.get("redact") or {})}
         cfg.update(saved)
         cfg["redact"] = redact
@@ -117,13 +125,13 @@ def load_audio(path: str, start: float | None = None, dur: float | None = None,
     try:
         proc = subprocess.run(cmd, capture_output=True, check=True)
     except FileNotFoundError as exc:
-        raise RuntimeError("ffmpeg tidak ditemukan. Jalankan: brew install ffmpeg") from exc
+        raise RuntimeError(tr("ffmpeg_missing")) from exc
     except subprocess.CalledProcessError as exc:
         msg = exc.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["?"]
-        raise RuntimeError(f"Gagal membaca audio: {msg[0]}") from exc
+        raise RuntimeError(tr("audio_read_failed", msg=msg[0])) from exc
     audio = np.frombuffer(proc.stdout, np.int16).astype(np.float32) / 32768.0
     if audio.size == 0:
-        raise RuntimeError("File tidak berisi audio.")
+        raise RuntimeError(tr("no_audio"))
     return audio
 
 
@@ -145,11 +153,10 @@ def probe(path: Path) -> dict:
         out["unknown"] = True
         return out
     except subprocess.TimeoutExpired:
-        out.update(ok=False, problem="File terlalu lama dibaca. Mungkin rusak atau masih disalin.")
+        out.update(ok=False, problem=tr("probe_slow"))
         return out
     if res.returncode != 0:
-        out.update(ok=False, problem="File rusak atau formatnya tidak dikenali. Coba ekspor ulang, "
-                                     "atau konversi dulu ke m4a.")
+        out.update(ok=False, problem=tr("probe_bad"))
         return out
     try:
         data = json.loads(res.stdout or "{}")
@@ -173,11 +180,9 @@ def probe(path: Path) -> dict:
                               "duration": d, "label": label})
         n += 1
     if not out["tracks"]:
-        out.update(ok=False, problem=("Video ini tidak punya suara. Saat merekam layar, pastikan "
-                                      "suara sistem atau mikrofon ikut direkam." if out["video"] else
-                                      "File ini tidak berisi suara."))
+        out.update(ok=False, problem=tr("video_no_sound") if out["video"] else tr("file_no_sound"))
     elif out["duration"] is not None and out["duration"] < 1:
-        out.update(ok=False, problem="Rekaman terlalu pendek (kurang dari 1 detik).")
+        out.update(ok=False, problem=tr("too_short"))
     return out
 
 
@@ -190,7 +195,7 @@ def default_track(info: dict):
 
 
 def disk_need(duration: float | None, video: bool) -> int:
-    """Bytes a meeting needs on disk: Audio bersih.m4a (+ Audio rapat.m4a for a video),
+    """Bytes a meeting needs on disk: Silence removed.m4a (+ Original audio.m4a for a video),
     transcripts and a safety margin. The recording itself is never copied."""
     hours = max((duration or 0) / 3600, 0.25)
     per_hour = 30 * 1024 ** 2 * (2 if video else 1)
@@ -583,13 +588,27 @@ def fmt_date_short(d: dt.datetime) -> str:
     return f"{d.day} {BULAN[d.month - 1][:3]} {d.year} {d:%H.%M}"
 
 
+MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
+          "September", "October", "November", "December"]
+DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def fmt_date_en(d: dt.datetime, with_day: bool = True) -> str:
+    base = f"{d.day} {MONTHS[d.month - 1]} {d.year}, {d:%H:%M}"
+    return f"{DAYS[d.weekday()]}, {base}" if with_day else base
+
+
+def fmt_date_short_en(d: dt.datetime) -> str:
+    return f"{d.day} {MONTHS[d.month - 1][:3]} {d.year} {d:%H:%M}"
+
+
 def format_transcript(segments: list[dict], title: str, clean: CleanResult | None = None,
                       meta: dict | None = None, participants: list[dict] | None = None) -> str:
-    """Write Transkrip.txt.
+    """Write Transcript.txt (labels are English in every UI language).
 
     With `meta` (v1.1) the header follows the approved sample report: title, date,
     recording, language, version, tagging status, AI suggestions and the
-    participant block. Lines are "[HH:MM:SS] Nama: teks", "(Belum ditandai): teks"
+    participant block. Lines are "[HH:MM:SS] Name: text", "(Not tagged): text"
     when a participant list exists but the segment is untagged, or plain text
     when no participants were entered.
     """
@@ -608,45 +627,46 @@ def format_transcript(segments: list[dict], title: str, clean: CleanResult | Non
     names = {p["id"]: p["name"] for p in parts}
     total = len(segments)
     tagged = sum(1 for s in segments if s.get("speaker_id") in names)
-    L = ["TRANSKRIP RAPAT",
-         f"Judul        : {title}"]
+    L = ["MEETING TRANSCRIPT",
+         f"Title        : {title}"]
     if meta.get("created"):
-        L.append(f"Tanggal      : {fmt_date_id(dt.datetime.fromisoformat(meta['created']))}")
+        L.append(f"Date         : {fmt_date_en(dt.datetime.fromisoformat(meta['created']))}")
     rec = meta.get("source_name") or ""
     if meta.get("duration_sec"):
         rec += f" ({fmt_dur(meta['duration_sec'])}"
         if meta.get("clean_sec") and meta.get("remove_silence", True):
-            rec += f"; setelah buang hening {fmt_dur(meta['clean_sec'])}"
+            rec += f"; {fmt_dur(meta['clean_sec'])} after silence removal"
         rec += ")"
     if rec.strip():
-        L.append(f"Rekaman      : {rec.strip()}")
-    L.append(f"Bahasa       : {LANG_NAMES.get(meta.get('language') or '', 'Otomatis')}")
+        L.append(f"Recording    : {rec.strip()}")
+    L.append(f"Language     : {LANG_NAMES_EN.get(meta.get('language') or '', 'Automatic')}")
     wm = meta.get("whisper_model") or {}
     if wm.get("name"):
-        L.append(f"Model        : Whisper {wm['name']} ({WHISPER_MODELS.get(wm.get('key'), {}).get('label', '')}, lokal)".replace(" (, lokal)", " (lokal)"))
+        label = WHISPER_LABELS_EN.get(wm.get("key"), "")
+        L.append(f"Model        : Whisper {wm['name']} ({label + ', ' if label else ''}local)")
     if meta.get("rev"):
         saved = meta.get("saved_at")
-        L.append(f"Versi        : {meta['rev']}" + (
-            f", disimpan {fmt_date_short(dt.datetime.fromisoformat(saved))}" if saved else ""))
+        L.append(f"Version      : {meta['rev']}" + (
+            f", saved {fmt_date_short_en(dt.datetime.fromisoformat(saved))}" if saved else ""))
     if not parts:
-        L.append(f"Penanda      : Tidak ada (0 dari {total} segmen)")
+        L.append(f"Speakers     : None (0 of {total} segments)")
     elif tagged == total:
-        L.append(f"Penanda      : {tagged} dari {total} segmen ditandai")
+        L.append(f"Speakers     : {tagged} of {total} segments tagged")
     else:
-        L.append(f"Penanda      : {tagged} dari {total} segmen ditandai, {total - tagged} belum ditandai")
+        L.append(f"Speakers     : {tagged} of {total} segments tagged, {total - tagged} not tagged")
     cs = meta.get("claude_suggest")
     if cs:
         who = f" · {cs['provider']}" if cs.get("provider") else ""
-        L.append(f"Saran AI     : ✦ Disarankan AI{who}, {fmt_date_short(dt.datetime.fromisoformat(cs['at']))}"
-                 f" ({cs.get('accepted', 0)} diterima, {cs.get('rejected', 0)} ditolak)")
+        L.append(f"AI review    : ✦ Suggested by AI{who}, {fmt_date_short_en(dt.datetime.fromisoformat(cs['at']))}"
+                 f" ({cs.get('accepted', 0)} accepted, {cs.get('rejected', 0)} rejected)")
     else:
-        L.append("Saran AI     : Tidak dijalankan")
-    L.append("Timestamp mengacu ke rekaman asli.")
+        L.append("AI review    : Not run")
+    L.append("Timestamps refer to the original recording.")
     L.append("")
     if not parts:
-        L.append("PESERTA      : Tidak diisi")
+        L.append("PARTICIPANTS : Not entered")
     else:
-        L.append(f"PESERTA ({len(parts)})")
+        L.append(f"PARTICIPANTS ({len(parts)})")
         for i, p in enumerate(parts):
             L.append(f"  {i + 1}. {p['name'].ljust(16)}{p.get('role') or ''}".rstrip())
     L.append("")
@@ -654,7 +674,7 @@ def format_transcript(segments: list[dict], title: str, clean: CleanResult | Non
     for s in segments:
         ts = f"[{fmt_ts(s['start'])}]"
         if s.get("secret"):
-            text = s["text"] + "  (rahasia, tidak dikirim ke layanan AI)"
+            text = s["text"] + "  (confidential, not sent to AI services)"
         else:
             text = s["text"]
         if not parts:
@@ -662,11 +682,13 @@ def format_transcript(segments: list[dict], title: str, clean: CleanResult | Non
         elif s.get("speaker_id") in names:
             L.append(f"{ts} {names[s['speaker_id']]}: {text}")
         else:
-            L.append(f"{ts} (Belum ditandai): {text}")
+            L.append(f"{ts} (Not tagged): {text}")
     return "\n".join(L) + "\n"
 
 
 LANG_NAMES = {"id": "Indonesia", "en": "Inggris", "": "Otomatis"}
+LANG_NAMES_EN = {"id": "Indonesian", "en": "English", "": "Automatic"}
+WHISPER_LABELS_EN = {"cepat": "Fast", "akurat": "Accurate"}
 
 
 # --------------------------------------------------------------------------- AI providers + API keys (Keychain)
@@ -713,8 +735,18 @@ def provider_url(cfg: dict | None = None, provider: str | None = None) -> str:
     return normalize_base_url((cfg.get("ai_base_url") or {}).get(provider) or PROVIDERS[provider]["url"])
 
 
+def provider_text(pid: str, field: str = "short") -> str:
+    """Provider name in the UI language (only the local and custom providers have one)."""
+    key = f"prov_{pid}_{field}"
+    return tr(key) if key in i18n.MESSAGES else PROVIDERS[pid][field]
+
+
+def whisper_label(key: str | None) -> str:
+    return tr(f"wm_{key}") if f"wm_{key}" in i18n.MESSAGES else WHISPER_MODELS.get(key, {}).get("label", "")
+
+
 def provider_name(cfg: dict | None = None, provider: str | None = None) -> str:
-    return PROVIDERS[provider or provider_id(cfg)]["short"]
+    return provider_text(provider or provider_id(cfg))
 
 
 def _account(provider: str) -> str:
@@ -756,9 +788,9 @@ def set_api_key(key: str, provider: str | None = None) -> None:
 def key_problem(key: str, provider: str) -> str | None:
     pre = PROVIDERS[provider]["prefix"]
     if not key:
-        return "API key kosong"
+        return tr("key_empty")
     if pre and not key.startswith(pre):
-        return f"Format API key {PROVIDERS[provider]['short']} tidak dikenali (diawali {pre})"
+        return tr("key_format", provider=provider_text(provider), prefix=pre)
     return None
 
 
@@ -930,7 +962,7 @@ Jenis rekaman:
 - Bagian yang tidak relevan untuk jenis rekaman itu (misalnya Keputusan atau Action Items pada narasi video) tetap ditulis, isinya "Tidak ada".
 
 Aturan umum:
-- Tulis dalam bahasa yang sama dengan transkrip (umumnya Bahasa Indonesia baku, ringkas).
+- Tulis laporan dalam Bahasa Indonesia baku dan ringkas, juga bila transkrip berbahasa lain. Nama, nama produk, istilah, dan kutipan tetap seperti yang diucapkan.
 - Jangan mengarang. Kalau tenggat atau angka tidak disebut, tulis "Tidak disebutkan".
 - Transkrip bisa berisi salah dengar. Tafsirkan sesuai konteks. Istilah yang ragu, tandai dengan (?).
 - Sertakan timestamp [HH:MM:SS] untuk poin, keputusan, dan action item bila bisa dilacak.
@@ -987,15 +1019,108 @@ Gunakan format Markdown persis seperti ini (tanpa teks lain sebelum judul):
 """
 
 
-def summarize(transcript: str, api_key: str, model: str = CLAUDE_MODEL, context: str = "",
-              header: str = "") -> str:
+SUMMARY_SYSTEM_EN = """You are a professional note-taker.
+Your task is to write a report from a transcript made by automatic speech-to-text and reviewed by the user.
+
+Type of recording:
+- The recording can be a meeting, discussion, interview, lecture, presentation, podcast, broadcast or video narration.
+- Find the type from the content, and write a report that fits that type. Do not judge the recording as misplaced or "not a meeting".
+- Use the meeting info and the extra context from the user when they exist. Do not invent an organization context that is not mentioned.
+- Sections that do not apply to the recording type (for example Decisions or Action Items for a video narration) are still written, with the content "None".
+
+General rules:
+- Write the report in English, also when the transcript is in another language. Keep names, product names, terms and quotes as they are spoken.
+- Do not invent facts. When a deadline or a number is not mentioned, write "Not mentioned".
+- The transcript can contain misheard words. Interpret them from the context. Mark an unsure term with (?).
+- Add a timestamp [HH:MM:SS] to points, decisions and action items when you can trace them.
+- The text contains tokens such as ‹ACCOUNT_1›, ‹ID_1›, ‹NAME_1›. They are masked data. Copy each token exactly. Do not change, guess or explain it.
+- The line "(confidential segment, not sent)" means its content is held back on purpose. Do not guess its content.
+
+Speaker labels:
+- A line "[HH:MM:SS] Name: text" means that voice is tagged as that participant.
+- A line "[HH:MM:SS] (Not tagged): text" means the speaker is not tagged. Do not guess the name from the context, for example from a greeting in an earlier segment.
+- A line without a label means the participant list is empty and nothing is tagged.
+
+Participants section:
+- When there is a participant list, write a "## Participants" section as a table | Name | Role/Unit | Segments | from the list (the segment counts are given). When some segments are not tagged, add the row "| ? Not tagged | – | <count> |". Names that the conversation mentions as participants but that are not in the list go under the table, with the bold title "Mentioned in the conversation, not in the participant list:" and their timestamps.
+- When the participant list is empty, write a "## Participants Mentioned" section: only the names spoken in the conversation, with short context and a timestamp, starting with an italic note that the names come from the conversation, not from the voices.
+- People who are only talked about (clients, outside parties, people under discussion) do not go in the Participants section.
+
+Attribution and owner (check from the top, use the first source that exists):
+1. Named in the conversation ("Andi, please ..."): Owner = that name. Owner basis: "◆ Named [HH:MM:SS]".
+2. Volunteered and the voice is tagged: Owner = the name from the label. Owner basis: "✓ Volunteered, voice tagged [HH:MM:SS]".
+3. A unit is named, not a person ("the product team will draft it"): Owner = the unit, plus the name in brackets when the voice is tagged. Owner basis: "◆ Unit named [HH:MM:SS]" or "✓ Volunteered for the unit, voice tagged [HH:MM:SS]".
+4. Volunteered but the voice is not tagged: Owner = "? Not tagged · HH:MM:SS". Owner basis: "? Volunteered, voice not tagged [HH:MM:SS]".
+5. The group says there is no owner yet: Owner = "Not decided".
+6. No information at all: Owner = "Not mentioned".
+- For points and decisions: use the name when the voice is tagged. When it is not, use the unit that is mentioned ("IT representative"), "an untagged speaker", or "the chair". Never infer a name from an untagged voice.
+- When an action item has the owner "? Not tagged", add an item under Open Issues: the owner of action item No X is not certain because the speaker is not tagged; give its timestamp.
+
+Use exactly this Markdown format (no text before the title):
+
+# <Title inferred from the content>
+
+## Executive Summary
+<3-5 sentences>
+
+## Participants
+<table, or "## Participants Mentioned", as the rules above say>
+
+## Discussion Points
+1. **<Topic>** [HH:MM:SS–HH:MM:SS]. <content>
+2. **<Topic>** [HH:MM:SS–HH:MM:SS]. <content>
+
+## Decisions
+1. ...
+
+## Action Items
+| No | Task | Owner | Deadline | Owner basis |
+|---|---|---|---|---|
+| 1 | ... | ... | ... | ... |
+
+## Open Issues and Risks
+- ...
+
+## Other Notes
+- ...
+"""
+
+REPORT_LANGS = ("id", "en")
+# words the summary request uses around the data, per report language
+SUMMARY_WRAP = {
+    "id": {"info": "info_rapat", "tr": "transkrip", "ctx": "Konteks tambahan dari pengguna"},
+    "en": {"info": "meeting_info", "tr": "transcript", "ctx": "Extra context from the user"},
+}
+
+
+def summary_system(lang: str) -> str:
+    return SUMMARY_SYSTEM_EN if lang == "en" else SUMMARY_SYSTEM
+
+
+def report_lang(meta: dict | None, cfg: dict, override: str | None = None) -> str:
+    """Language of a new summary: the choice in the send sheet, else the meeting's last choice,
+    else the setting, else the transcript language, else the app language."""
+    for v in (override, (meta or {}).get("report_language"), cfg.get("report_language"),
+              (meta or {}).get("language")):
+        if v in REPORT_LANGS:
+            return v
+    return i18n.current() if i18n.current() in REPORT_LANGS else "id"
+
+
+def summary_user(header: str, transcript: str, context: str, lang: str) -> str:
+    w = SUMMARY_WRAP.get(lang, SUMMARY_WRAP["id"])
     user = ""
     if header.strip():
-        user += f"<info_rapat>\n{header.strip()}\n</info_rapat>\n\n"
-    user += f"<transkrip>\n{transcript}\n</transkrip>"
+        user += f"<{w['info']}>\n{header.strip()}\n</{w['info']}>\n\n"
+    user += f"<{w['tr']}>\n{transcript}\n</{w['tr']}>"
     if context.strip():
-        user += f"\n\nKonteks tambahan dari pengguna: {context.strip()}"
-    return ai_text(SUMMARY_SYSTEM, user, api_key, model)
+        user += f"\n\n{w['ctx']}: {context.strip()}"
+    return user
+
+
+def summarize(transcript: str, api_key: str, model: str = CLAUDE_MODEL, context: str = "",
+              header: str = "", lang: str = "id") -> str:
+    return ai_text(summary_system(lang), summary_user(header, transcript, context, lang), api_key, model)
 
 
 def test_api_key(api_key: str, model: str = CLAUDE_MODEL, provider: str | None = None,
@@ -1100,19 +1225,19 @@ def safe_title(title: str) -> str:
     t = FORBIDDEN_TITLE.sub("-", str(title or ""))
     t = re.sub(r"[\x00-\x1f]", "", t)
     t = re.sub(r"\s+", " ", t).strip().lstrip(".").strip()
-    return t[:TITLE_MAX].strip() or "Rapat"
+    return t[:TITLE_MAX].strip() or tr("default_title")
 
 
 def title_problem(title: str) -> str | None:
     """Validation message for a title typed by the user, or None when it is fine."""
     t = str(title or "").strip()
     if not t:
-        return "Judul tidak boleh kosong."
+        return tr("title_empty")
     bad = FORBIDDEN_TITLE.search(t)
     if bad:
-        return f"Karakter {bad.group(0)} tidak bisa dipakai di judul karena dilarang di nama folder Mac."
+        return tr("title_bad_char", char=bad.group(0))
     if len(t) > TITLE_MAX:
-        return f"Judul maksimal {TITLE_MAX} karakter."
+        return tr("title_too_long", n=TITLE_MAX)
     return None
 
 

@@ -44,6 +44,9 @@ SENT = {}
 
 def fake_claude(system, user, key, model, max_tokens):
     SENT["user"] = user
+    SENT["system"] = system
+    if "Write the report in English" in system:
+        return ("# KUR Meeting\n\n## Executive Summary\nMoney to ‹ACCOUNT_1›.\n\n## Other Notes\n- None.\n")
     if "JSON array" in system:
         return '[{"id":"s00001","from":"restrukturasi","to":"restrukturisasi","reason":"istilah"}]'
     return ("# Rapat KUR\n\n## Ringkasan Eksekutif\nDana ke ‹REKENING_1›.\n\n## Action Items\n"
@@ -100,7 +103,7 @@ def test_full_flow(env):
     assert m["status"] == "awaiting_review", m.get("error")
     assert m["audio"]["bersih"] and m["counts"]["total"] == 3
     folder = st.path(mid)
-    assert (folder / "Transkrip asli.txt").exists()
+    assert (folder / "Original transcript.txt").exists()
 
     ed = c.get(f"/api/meetings/{mid}/editor").json()
     assert any(s["to"] == "restrukturisasi" for s in ed["local"]) is False or True
@@ -125,21 +128,21 @@ def test_full_flow(env):
     assert "0331" not in SENT["user"]
     m = c.get(f"/api/meetings/{mid}").json()
     assert m["status"] == "done" and m["summary_count"] == 1
-    md = (folder / "Ringkasan.md").read_text()
+    md = (folder / "Summary.md").read_text()
     assert "0331 0100 0412" in md and "_Dibuat dari transkrip versi 1 · 0 dari 3 segmen ditandai_" in md
     assert "Tidak ada." not in md and "segmen belum ditandai" in md
-    assert (folder / "Ringkasan.docx").exists()
+    assert (folder / "Summary.docx").exists()
 
     # tag a speaker -> rev 2, summary stale with ⚠ line, body untouched
     segs[2]["speaker_id"] = "p2"
     r = c.post(f"/api/meetings/{mid}/save", json={"segments": segs, "participants": parts}).json()
     assert r["changed"] and r["rev"] == 2 and r["meeting"]["stale"]
     assert "1 segmen ditandai" in r["meeting"]["stale_text"]
-    md2 = (folder / "Ringkasan.md").read_text()
+    md2 = (folder / "Summary.md").read_text()
     assert md2.startswith("⚠ Ringkasan ini dibuat dari transkrip versi 1. Transkrip sudah diperbarui ke versi 2")
     assert md2.split("\n\n", 1)[1] == md
-    tx = (folder / "Transkrip.txt").read_text()
-    assert "Pak Andi: Pak Andi tolong" in tx and "(Belum ditandai): Selamat pagi" in tx
+    tx = (folder / "Transcript.txt").read_text()
+    assert "Pak Andi: Pak Andi tolong" in tx and "(Not tagged): Selamat pagi" in tx
 
     # Claude suggestions -> accept -> version marked claude
     assert c.post(f"/api/meetings/{mid}/suggest", json={"confirmed": True}).status_code == 200
@@ -150,7 +153,7 @@ def test_full_flow(env):
     r = c.post(f"/api/meetings/{mid}/save", json={"segments": segs, "participants": parts,
                                                   "claude": {"accepted": 1, "rejected": 0}}).json()
     assert r["rev"] == 3 and r["meeting"]["claude_suggest"]["accepted"] == 1
-    assert "✦ Disarankan AI" in (folder / "Transkrip.txt").read_text()
+    assert "✦ Suggested by AI" in (folder / "Transcript.txt").read_text()
     assert c.get(f"/api/meetings/{mid}/editor").json()["claude"] == []
 
     # update summary -> not stale, ⚠ removed
@@ -158,8 +161,8 @@ def test_full_flow(env):
     wait(jb)
     m = c.get(f"/api/meetings/{mid}").json()
     assert not m["stale"] and m["summary_count"] == 2
-    assert not (folder / "Ringkasan.md").read_text().startswith("⚠")
-    assert "Transkrip sudah melalui saran AI" in (folder / "Ringkasan.md").read_text()
+    assert not (folder / "Summary.md").read_text().startswith("⚠")
+    assert "Transkrip sudah melalui saran AI" in (folder / "Summary.md").read_text()
 
     # restore version 1 = new version 4, history kept
     r = c.post(f"/api/meetings/{mid}/restore", json={"rev": 1}).json()
@@ -216,6 +219,40 @@ def test_v1_migration(env):
     assert (d / "Transkrip.txt").read_text().startswith("Transkrip: Rapat Lama")  # untouched
     m = c.get(f"/api/meetings/{d.name}").json()
     assert m["duration_sec"] == 600 and m["clean_sec"] == 480 and m["transcript_rev"] == 1
+
+
+def test_dropped_recording_kept_as_original_recording(env):
+    c, st, jb, _ = env
+    info = c.post("/api/upload", content=b"x", headers={"x-filename": "Weekly sync.M4A"}).json()
+    mid = c.post("/api/meetings", json={"source_path": info["path"]}).json()["id"]
+    wait(jb)
+    assert st.meta(mid)["source"] == str(st.path(mid) / "Original recording.m4a")
+    assert (st.path(mid) / "Original recording.m4a").exists()
+
+
+def test_result_files_get_english_names(env):
+    c, st, jb, src = env
+    mid = c.post("/api/meetings", json={"source_path": str(src)}).json()["id"]
+    wait(jb)
+    p = st.path(mid)
+    (p / "Original transcript.txt").rename(p / "Transkrip asli.txt")
+    (p / "Silence removed.m4a").rename(p / "Audio bersih.m4a")
+    (p / "Rekaman asli.wav").write_bytes(b"x")
+    st.update(mid, source=str(p / "Rekaman asli.wav"))
+    assert st.result_file(mid, store_mod.CLEAN_AUDIO).name == "Audio bersih.m4a"  # fallback before rename
+    assert c.get(f"/api/meetings/{mid}/audio/bersih").status_code == 200
+    v1 = st.root / "2026-10-01 0930 - Rapat Lama"
+    v1.mkdir()
+    (v1 / "Transkrip.txt").write_text("Transkrip: Rapat Lama\n\n[00:00:01] Halo\n")
+    c.get("/api/meetings")
+    st.rename_result_files()
+    assert (p / "Original transcript.txt").exists() and not (p / "Transkrip asli.txt").exists()
+    assert (p / "Silence removed.m4a").exists() and not (p / "Audio bersih.m4a").exists()
+    assert (p / "Original recording.wav").exists() and not (p / "Rekaman asli.wav").exists()
+    assert st.meta(mid)["source"] == str(p / "Original recording.wav")
+    assert (v1 / "Transkrip.txt").exists() and not (v1 / "Transcript.txt").exists()  # v1 files untouched
+    m = c.get(f"/api/meetings/{mid}").json()
+    assert m["audio"]["bersih"] and m["audio"]["clean_file"] == "Silence removed.m4a"
 
 
 def test_delete_requires_idle(env, monkeypatch):
@@ -490,7 +527,7 @@ def test_video_meeting_gets_audio_rapat(env, tmp_path, monkeypatch):
     wait(jb)
     m = c.get(f"/api/meetings/{mid}").json()
     assert m["settings"]["audio_track"] == "mix" and m["audio"]["rapat"]
-    assert (st.path(mid) / "Audio rapat.m4a").exists()
+    assert (st.path(mid) / "Original audio.m4a").exists()
 
 
 def test_video_without_sound_is_refused(env, tmp_path, monkeypatch):
@@ -523,7 +560,7 @@ def test_whisper_model_choice(env):
     assert m["whisper_model"] == {"key": "akurat", "name": "large-v3", "repo": "mlx-community/whisper-large-v3-mlx"}
     assert seen and set(seen) == {"mlx-community/whisper-large-v3-mlx"}
     assert downloads == ["mlx-community/whisper-large-v3-mlx"]
-    assert "Model        : Whisper large-v3 (Akurat, lokal)" in (st.path(mid) / "Transkrip asli.txt").read_text()
+    assert "Model        : Whisper large-v3 (Accurate, local)" in (st.path(mid) / "Original transcript.txt").read_text()
     # default from settings when the form does not say
     c.put("/api/settings", json={"whisper_model": "akurat"})
     r = c.post("/api/meetings", json={"source_path": str(src), "title": "Uji default"})
@@ -691,12 +728,56 @@ def test_suggest_job_reports_each_step(env):
     assert st.meta(mid)["suggest_job"] is None
 
 
+def test_report_language(env):
+    """v1.7: the report language picks the prompt, the text around the data and the fixed report lines."""
+    c, st, jb, src = env
+    mid = c.post("/api/meetings", json={"source_path": str(src), "title": "Rapat KUR", "language": "id",
+                                        "participants": [{"name": "Pak Andi", "role": "IT"}]}).json()["id"]
+    wait(jb)
+    ed = c.get(f"/api/meetings/{mid}/editor").json()
+    segs = ed["base"]["segments"]
+    segs[0]["secret"] = True
+    c.post(f"/api/meetings/{mid}/save", json={"segments": segs, "participants": ed["base"]["participants"]})
+    # default: same as the transcript (Indonesian)
+    assert c.get(f"/api/meetings/{mid}").json()["report_lang"] == "id"
+    pv = c.post(f"/api/meetings/{mid}/preview", json={"report_language": "en"}).json()
+    assert "(Not tagged)" in pv["transcript"] and "(confidential segment, not sent)" in pv["transcript"]
+    assert pv["header"].startswith("Title: Rapat KUR")
+    # the AI suggestion sheet keeps the Indonesian labels the suggestion prompt expects
+    assert "(Belum ditandai)" in c.post(f"/api/meetings/{mid}/preview", json={}).json()["transcript"]
+
+    c.post(f"/api/meetings/{mid}/summary", json={"confirmed": True, "report_language": "en"})
+    wait(jb)
+    assert "Write the report in English" in SENT["system"]
+    assert "<transcript>" in SENT["user"] and "<meeting_info>" in SENT["user"]
+    assert "‹ACCOUNT_1›" in SENT["user"] and "REKENING" not in SENT["user"]
+    m = c.get(f"/api/meetings/{mid}").json()
+    assert m["report_language"] == "en" and m["report_lang"] == "en"   # the meeting keeps its choice
+    md = (st.path(mid) / "Summary.md").read_text()
+    assert "_Made from transcript version 1 · 0 of 3 segments tagged_" in md
+    assert "0331 0100 0412" in md and "None." not in md and "segments have no speaker tag" in md
+    assert "_Made " in md.splitlines()[-1]
+
+    # stale line follows the summary language
+    segs[1]["speaker_id"] = ed["base"]["participants"][0]["id"]
+    c.post(f"/api/meetings/{mid}/save", json={"segments": segs, "participants": ed["base"]["participants"]})
+    assert (st.path(mid) / "Summary.md").read_text().startswith("⚠ This summary is from transcript version 1.")
+
+    # the setting is the default for other meetings; the transcript language is next
+    assert c.put("/api/settings", json={"report_language": "xx"}).status_code == 200
+    assert core.load_config()["report_language"] == ""
+    c.put("/api/settings", json={"report_language": "en"})
+    assert core.report_lang({"language": "id"}, core.load_config()) == "en"
+    assert core.report_lang({"language": "en"}, {"report_language": ""}) == "en"
+    assert core.report_lang({"language": "en", "report_language": "id"}, {}) == "id"
+
+
 def test_index_carries_saved_theme(env):
     c, *_ = env
     browser = TestClient(c.app, base_url="http://127.0.0.1:8765")
     assert "data-theme" not in browser.get(f"/?t={TOKEN}").text
     core.save_config({**core.load_config(), "theme": "dark"})
-    assert '<html data-theme="dark" lang="id">' in browser.get(f"/?t={TOKEN}").text
+    assert '<html data-theme="dark" lang=' in browser.get(f"/?t={TOKEN}").text
 
 
 def test_launcher_window_theme(tmp_path, monkeypatch):
@@ -704,13 +785,15 @@ def test_launcher_window_theme(tmp_path, monkeypatch):
 
     monkeypatch.setattr(core, "SUPPORT_DIR", tmp_path)
     monkeypatch.setattr(main, "macos_dark", lambda: True)
+    monkeypatch.setattr(main, "macos_lang", lambda: "id")
     assert main.window_theme() == "dark"
     monkeypatch.setattr(main, "macos_dark", lambda: False)
     assert main.window_theme() == "light"
     core.save_config({**core.load_config(), "theme": "dark"})
     assert main.window_theme() == "dark"
-    page = main.loader_html("dark")
-    assert main.THEME_COLORS["dark"]["bg"] in page and "setStatus" in page and "showError" in page
+    assert main.launcher_lang() == "id"
+    page = main.loader_html("dark", "en")
+    assert "Opening Meeting Report" in page and main.THEME_COLORS["dark"]["bg"] in page and "setStatus" in page and "showError" in page
     assert "<svg" in page
 
 
@@ -725,7 +808,7 @@ def test_launcher_ensure_server_reports_steps(monkeypatch):
     monkeypatch.setattr(main, "free_port", lambda: None)
     monkeypatch.setattr(main, "start_server", lambda: up.append(1))
     main.ensure_server(steps.append)
-    assert steps == ["Menyalakan server…"] and up
+    assert steps == ["loader_starting"] and up
     steps.clear()
     main.ensure_server(steps.append)
     assert steps == []
