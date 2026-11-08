@@ -855,7 +855,7 @@ function scrubSet(el, t) {
   const i = el.querySelector('i'); if (i) i.style.width = `${len ? Math.min(100, t / len * 100).toFixed(2) : 0}%`;
   el.setAttribute('aria-valuenow', Math.round(t)); el.setAttribute('aria-valuetext', fmtDur(t));
   if (inEditor()) { const ts = $('#pl-ts'); if (ts) ts.textContent = fmtTs(t); }
-  else { const tt = $(`#ap-t-${kind}`); if (tt) tt.textContent = `${fmtDur(t)} / ${fmtDur(len)}`; }
+  else { const tt = $('#ap-t'); if (tt) tt.textContent = `${fmtTs(t)} / ${fmtTs(len)}`; }
 }
 function scrubCommit(kind, t) {
   const m = S.m; if (!m) return;
@@ -1153,34 +1153,39 @@ function S6d() {
 /* ------------------------------------------------------------------ S6c audio */
 function S6c() {
   const m = S.m;
-  const player = (kind, title, sub) => {
-    const on = audio.dataset.src === audioUrl(m.id, kind);
-    const playing = on && !audio.paused;
-    const pos = on ? audio.currentTime : 0, len = on && isFinite(audio.duration) ? audio.duration : (kind === 'asli' ? m.duration_sec : m.clean_sec) || 0;
-    return `<div class="card aplayer"><div class="top"><button class="pbtn" data-act="aplay" data-a="${kind}" aria-label="${playing ? 'Jeda' : 'Putar'}">${ic(playing ? 'pause' : 'play')}</button><h3>${title}</h3><span class="mono muted" style="font-size:12px" id="ap-t-${kind}">${fmtDur(pos)} / ${fmtDur(len)}</span><span style="flex:1"></span><select class="pop" data-ch="arate" aria-label="Kecepatan">${[1, 1.25, 1.5, 2].map(r => `<option value="${r}"${audio.playbackRate === r ? ' selected' : ''}>${String(r).replace('.', ',')}×</option>`).join('')}</select></div>${scrubHTML(kind, pos, len, `ap-b-${kind}`)}<div class="muted" style="font-size:12px;display:flex;gap:6px;align-items:center">${sub}</div></div>`;
+  // NOTE: audio already playing from this meeting wins over the saved choice, so label and sound agree
+  const loaded = kKind();
+  if (loaded && !audio.paused && loaded !== kSrc()) kUseSrc(loaded, false);
+  const src = kSrc();
+  const lost = m.audio.asli ? '' : `<div class="banner warn">${ic('warn')}<span class="grow">Rekaman asli tidak ditemukan di lokasi awalnya${m.source_name ? ` (${esc(m.source_name)})` : ''}. Bagian yang tidak ada di Audio bersih tidak bisa diputar.</span></div>`;
+  if (!src) return dhead('audio') + `<div class="dbody one"><div class="dmain kmain">${lost}<div class="banner">${ic('info')}<span class="grow">Tidak ada audio yang bisa diputar untuk rapat ini.</span></div><div id="sync-slot"></div></div></div>`;
+  const on = audio.dataset.src === audioUrl(m.id, src);
+  const playing = on && !audio.paused;
+  const pos = on ? audio.currentTime : 0, len = audioLen(src);
+  const why = {
+    asli: m.audio.asli ? '' : 'Rekaman asli tidak ditemukan di lokasi awalnya',
+    bersih: !m.audio.bersih ? 'Audio bersih tidak disimpan untuk rapat ini' : K.data && K.mid === m.id && !kMapUsable() ? 'Peta waktu Audio bersih tidak cocok, jadi transkrip tidak bisa mengikutinya' : '',
   };
-  const asli = m.audio.asli ? player('asli', 'Rekaman asli', `${ic('info', 'sm')}Timestamp transkrip mengacu ke rekaman asli. ${esc(m.source_name || '')}`)
-    : `<div class="banner warn">${ic('warn')}<span class="grow">Rekaman asli tidak ditemukan di lokasi awalnya${m.source_name ? ` (${esc(m.source_name)})` : ''}. Pemutaran per segmen butuh rekaman asli.</span></div>`;
-  const bersih = m.audio.bersih ? player('bersih', 'Audio bersih', `${ic('check', 'sm')}${m.duration_sec && m.clean_sec ? fmtDur(m.duration_sec - m.clean_sec) + ' hening dibuang · ' : ''}Di rekaman asli <b class="mono" id="ap-orig">–</b> · Audio bersih.m4a <button class="btn ghost" data-act="finder" data-file="Audio bersih.m4a" style="height:22px">${ic('folder', 'sm')}Tampilkan di Finder</button>`)
-    : `<div class="banner">${ic('info')}<span class="grow">Audio bersih tidak disimpan untuk rapat ini.</span></div>`;
-  return dhead('audio') + `<div class="dbody one"><div class="dmain kmain">${asli}${bersih}<div id="sync-slot"></div></div></div>`;
+  const opt = (k, label) => `<button data-act="asrc" data-a="${k}" aria-pressed="${src === k}"${why[k] ? ` disabled title="${esc(why[k])}"` : ''}>${label}</button>`;
+  const sub = src === 'bersih'
+    ? `${ic('check', 'sm')}${m.duration_sec && m.clean_sec ? fmtDur(m.duration_sec - m.clean_sec) + ' hening dibuang · ' : ''}Audio bersih.m4a <button class="btn ghost" data-act="finder" data-file="Audio bersih.m4a" style="height:22px">${ic('folder', 'sm')}Tampilkan di Finder</button>`
+    : `${ic('info', 'sm')}Rekaman lengkap, termasuk hening${m.source_name ? ` · ${esc(m.source_name)}` : ''}${why.bersih ? ` · ${esc(why.bersih)}` : ''}`;
+  const dock = `<div class="adock" role="region" aria-label="Pemutar audio"><div class="top"><button class="pbtn" data-act="aplay" data-a="${src}" aria-label="${playing ? 'Jeda' : 'Putar'}">${ic(playing ? 'pause' : 'play')}</button><div class="segc" role="group" aria-label="Sumber audio">${opt('asli', 'Rekaman asli')}${opt('bersih', 'Audio bersih')}</div><span class="mono muted aclock" id="ap-t">${fmtTs(pos)} / ${fmtTs(len)}</span><span class="grow"></span><select class="pop" data-ch="arate" aria-label="Kecepatan">${[1, 1.25, 1.5, 2].map(r => `<option value="${r}"${audio.playbackRate === r ? ' selected' : ''}>${String(r).replace('.', ',')}×</option>`).join('')}</select></div>${scrubHTML(src, pos, len, 'ap-b')}<div class="asub">${sub}</div></div>`;
+  return dhead('audio') + `<div class="dbody one"><div class="dmain kmain">${lost}<div id="sync-slot"></div>${dock}</div></div>`;
 }
 function patchAudio() {
-  const m = S.m; if (!m) return;
-  ['asli', 'bersih'].forEach(k => {
-    if (audio.dataset.src !== audioUrl(m.id, k)) return;
-    const t = $(`#ap-t-${k}`), b = $(`#ap-b-${k}`);
-    const len = isFinite(audio.duration) ? audio.duration : 0;
-    if (t) t.textContent = `${fmtDur(audio.currentTime)} / ${fmtDur(len)}`;
-    if (b && !S.scrub) { b.style.width = `${len ? (audio.currentTime / len * 100).toFixed(2) : 0}%`; b.parentElement.setAttribute('aria-valuenow', Math.round(audio.currentTime)); b.parentElement.setAttribute('aria-valuetext', fmtDur(audio.currentTime)); }
-  });
+  const m = S.m, k = kSrc(); if (!m || !k || audio.dataset.src !== audioUrl(m.id, k)) return;
+  const t = $('#ap-t'), b = $('#ap-b');
+  const len = isFinite(audio.duration) ? audio.duration : 0;
+  if (t) t.textContent = `${fmtTs(audio.currentTime)} / ${fmtTs(len)}`;
+  if (b && !S.scrub) { b.style.width = `${len ? (audio.currentTime / len * 100).toFixed(2) : 0}%`; b.parentElement.setAttribute('aria-valuenow', Math.round(audio.currentTime)); b.parentElement.setAttribute('aria-valuetext', fmtDur(audio.currentTime)); }
 }
 
 /* ------------------------------------------------------------------ Interactive Transcript (v1.6) */
 const KLEAD = 0.08;   // NOTE: Whisper word times run a little late
 const K = { mid: null, data: null, pending: null, el: null, list: null, rows: [], ord: [], starts: null, cut: [],
   cur: -1, curW: -1, past: -1, follow: true, word: true, scroll: 0, progUntil: 0, raf: 0, io: null,
-  mapBad: false, err: null, loading: null };
+  mapBad: false, err: null, loading: null, src: null, srcMid: null, ask: null };
 try { K.word = localStorage.getItem('mn-sync-word') !== '0'; } catch (e) { /* storage blocked */ }
 const kToks = t => String(t || '').split(/\s+/).filter(Boolean);
 function kRows() { return (K.data && K.data.map && K.data.map.rows) || []; }
@@ -1205,6 +1210,38 @@ function kKind() {
   if (audio.dataset.src === audioUrl(m.id, 'bersih')) return 'bersih';
   if (audio.dataset.src === audioUrl(m.id, 'asli')) return 'asli';
   return null;
+}
+const kSrcKey = mid => `mn-audio-src:${mid}`;
+// NOTE: Audio bersih is the default only when its time map fits the file
+function kSrc() {
+  const m = S.m; if (!m || !m.audio) return null;
+  if (K.srcMid !== m.id) {
+    let v = null;
+    try { v = localStorage.getItem(kSrcKey(m.id)); } catch (e) { /* storage blocked */ }
+    K.src = v || 'auto'; K.srcMid = m.id;
+  }
+  const canB = m.audio.bersih && (!K.data || K.mid !== m.id || kMapUsable());
+  if (K.src === 'asli' && m.audio.asli) return 'asli';
+  if (K.src !== 'asli' && canB) return 'bersih';
+  return m.audio.asli ? 'asli' : m.audio.bersih ? 'bersih' : null;
+}
+function kUseSrc(kind, save) {
+  const m = S.m; if (!m) return;
+  K.src = kind; K.srcMid = m.id;
+  if (save) { try { localStorage.setItem(kSrcKey(m.id), kind); } catch (e) { /* ignore */ } }
+  if (K.data && K.mid === m.id) { K.cur = -1; K.curW = -1; K.past = -1; kBuild(); }
+}
+function kSetSrc(kind) {
+  const m = S.m; if (!m || kind === kSrc()) return;
+  const o = kPos(), was = !!kKind() && !audio.paused;
+  kUseSrc(kind, true);
+  if (kind !== kSrc()) { render(); return; }
+  if (o != null) {
+    stopAt = null;
+    const t = kind === 'bersih' ? kToClean(o) + 0.001 : o;
+    seekTo(audioUrl(m.id, kind), t, () => { if (was) audio.play().catch(() => toast('Audio tidak bisa diputar', null, 'bad')); karUpdate(true); patchAudio(); });
+  }
+  render();
 }
 function kPos() {
   const k = kKind(); if (!k || audio.readyState < 1) return null;
@@ -1245,7 +1282,9 @@ function kToolHTML() {
   if (!d.has_words) notes.push(`<span class="knote est" title="Rapat ini diproses sebelum v1.6, jadi waktu tiap kata dihitung dari panjang kata.">≈ Waktu kata diperkirakan</span>`);
   if (m && m.audio && m.audio.bersih && !kMapUsable()) notes.push(`<span class="knote warn">${ic('warn', 'sm')}${K.mapBad ? 'Audio bersih tidak cocok dengan peta waktunya' : 'Peta waktu audio bersih tidak ada'}. Sorotan hanya mengikuti Rekaman asli.</span>`);
   const pend = K.pending ? `<div class="banner warn kpend">${ic('info')}<span class="grow"><b>Versi ${K.pending.rev} tersedia.</b> Yang tampil masih v${d.rev} supaya teks tidak berubah saat sedang didengar.</span><button class="btn pri" data-k="loadPending">Muat v${K.pending.rev}</button></div>` : '';
-  return `<div class="khead"><h3>Interactive Transcript</h3><span>Baca sambil dengar. Klik kata untuk memutar dari situ.</span></div><div class="ktool"><span class="kver">${ic('doc', 'sm')}${esc(kVerText(d))}</span>${notes.join('')}<span class="grow"></span><label class="kopt"><input type="checkbox" data-k="word"${K.word ? ' checked' : ''}> Sorot per kata <kbd>W</kbd></label><label class="kopt"><input type="checkbox" data-k="follow"${K.follow ? ' checked' : ''}> Ikuti audio <kbd>F</kbd></label></div>${pend}`;
+  const src = kSrc();
+  const lab = src ? `<span class="ksrc">${ic('wave', 'sm')}Mengikuti: ${src === 'bersih' ? 'Audio bersih' : 'Rekaman asli'}</span>` : '';
+  return `<div class="khead"><h3>Interactive Transcript</h3><span>Baca sambil dengar. Klik kata untuk memutar dari situ.</span></div><div class="ktool">${lab}<span class="kver">${ic('doc', 'sm')}${esc(kVerText(d))}</span>${notes.join('')}<span class="grow"></span><label class="kopt"><input type="checkbox" data-k="word"${K.word ? ' checked' : ''}> Sorot per kata <kbd>W</kbd></label><label class="kopt"><input type="checkbox" data-k="follow"${K.follow ? ' checked' : ''}> Ikuti audio <kbd>F</kbd></label></div>${pend}`;
 }
 function kPatchTool() { if (!K.el) return; const t = K.el.querySelector('.ktop'); if (t) t.innerHTML = kToolHTML(); }
 function kBuild() {
@@ -1253,19 +1292,23 @@ function kBuild() {
   const names = nameMap(d.participants), hasParts = (d.participants || []).length > 0;
   const rows = kRows();
   K.cut = segs.map(s => rows.length > 0 && !rows.some(r => r[1] < s.end - 0.05 && r[1] + r[2] > s.start + 0.05));
+  const clean = kSrc() === 'bersih' && kMapUsable();
   const html = segs.map((s, i) => {
     const prev = segs[i - 1];
     const cont = prev && (prev.speaker_id || null) === (s.speaker_id || null) && (!!names[prev.speaker_id] === !!names[s.speaker_id]);
     const nm = names[s.speaker_id];
     const who = hasParts ? `<span class="who${nm ? '' : ' none'}"><span class="av" aria-hidden="true">${nm ? esc(nm.trim()[0] || '?') : '?'}</span><span class="nm">${nm ? esc(nm) : 'Belum ditandai'}</span></span>` : '';
-    const extra = (s.secret ? ` <span class="pill p-neutral klock">${ic('lock', 'sm')}Rahasia</span>` : '') + (K.cut[i] ? ` <span class="kcut">${ic('info', 'sm')}Tidak ada di audio bersih</span>` : '') + (s.est && d.has_words ? ' <span class="kest" title="Waktu kata di segmen ini diperkirakan">≈</span>' : '');
-    const cutSec = prev && rows.length ? (s.start - prev.end) - (kToClean(s.start) - kToClean(prev.end)) : 0;
+    const extra = (s.secret ? ` <span class="pill p-neutral klock">${ic('lock', 'sm')}Rahasia</span>` : '') + (clean && K.cut[i] ? ` <span class="kcut">${ic('info', 'sm')}Tidak ada di audio bersih</span>` : '') + (s.est && d.has_words ? ' <span class="kest" title="Waktu kata di segmen ini diperkirakan">≈</span>' : '');
+    const cutSec = clean && prev ? (s.start - prev.end) - (kToClean(s.start) - kToClean(prev.end)) : 0;
     const gap = cutSec > 1 ? `<div class="kgap" aria-hidden="true">${Math.round(cutSec)} dtk hening dibuang</div>` : '';
-    return gap + `<div class="kseg${cont ? ' cont' : ''}${hasParts ? '' : ' noparts'}" role="listitem" data-i="${i}"><button class="ts" data-i="${i}" title="Putar dari ${fmtTs(s.start)}">${fmtTs(s.start)}</button>${who}<span class="txt">${esc(kToks(s.text).join(' '))}</span>${extra ? `<span class="kx">${extra}</span>` : ''}</div>`;
+    const off = clean && K.cut[i];
+    const at = clean && !off ? kToClean(s.start) : s.start;
+    const tip = !clean ? `Putar dari ${fmtTs(s.start)}` : off ? `Tidak ada di Audio bersih · di rekaman asli ${fmtTs(s.start)}` : `Di rekaman asli ${fmtTs(s.start)}`;
+    return gap + `<div class="kseg${cont ? ' cont' : ''}${hasParts ? '' : ' noparts'}${off ? ' cut' : ''}" role="listitem" data-i="${i}"><button class="ts" data-i="${i}" title="${tip}">${fmtTs(at)}</button>${who}<span class="txt">${esc(kToks(s.text).join(' '))}</span>${extra ? `<span class="kx">${extra}</span>` : ''}</div>`;
   }).join('') || '<div class="muted" style="padding:20px">Transkrip ini kosong.</div>';
   const el = document.createElement('div');
   el.className = 'card tsync';
-  el.innerHTML = `<div class="ktop">${kToolHTML()}</div><div class="kwrap"><div class="klist" role="list" aria-label="Transkrip mengikuti audio">${html}</div><button class="btn pri kfollow" data-k="followOn" hidden></button></div><div class="khint"><span><kbd>Spasi</kbd> putar/jeda</span><span><kbd>←</kbd><kbd>→</kbd> 5 dtk (<kbd>Shift</kbd> 30)</span><span><kbd>↑</kbd><kbd>↓</kbd> segmen sebelum/berikut</span><span><kbd>F</kbd> ikuti audio</span><span><kbd>W</kbd> sorot kata</span><span><kbd>[</kbd><kbd>]</kbd> kecepatan</span></div>`;
+  el.innerHTML = `<div class="ktop">${kToolHTML()}</div><div class="kwrap"><div class="klist" role="list" aria-label="Transkrip mengikuti audio">${html}</div><button class="btn pri kfollow" data-k="followOn" hidden></button></div><div class="khint"><span><kbd>Spasi</kbd> putar/jeda</span><span><kbd>←</kbd><kbd>→</kbd> 5 dtk (<kbd>Shift</kbd> 30)</span><span><kbd>↑</kbd><kbd>↓</kbd> segmen sebelum/berikut</span><span><kbd>S</kbd> ganti sumber</span><span><kbd>F</kbd> ikuti audio</span><span><kbd>W</kbd> sorot kata</span><span><kbd>[</kbd><kbd>]</kbd> kecepatan</span></div>`;
   K.el = el; K.list = el.querySelector('.klist');
   K.list.classList.toggle('noword', !K.word);
   K.rows = [...K.list.querySelectorAll('.kseg')];
@@ -1365,8 +1408,7 @@ function kFind(o) {
 }
 function karUpdate(force) {
   if (!K.el || !K.el.isConnected || !K.data) return;
-  const o = kPos();
-  const og = document.getElementById('ap-orig'); if (og) og.textContent = kKind() === 'bersih' && o != null ? fmtTs(o) : '–';
+  const o = kKind() === kSrc() ? kPos() : null;
   const i = o == null ? -1 : kFind(o + KLEAD);
   if (i !== K.cur || force) {
     if (K.cur >= 0 && K.rows[K.cur]) { K.rows[K.cur].classList.remove('on'); K.rows[K.cur].removeAttribute('aria-current'); }
@@ -1405,11 +1447,18 @@ function kLoop() {
 }
 function kSeek(o, play, i) {
   const m = S.m; if (!m) return;
-  let kind = kKind();
-  const canB = m.audio.bersih && kMapUsable(), canA = m.audio.asli;
-  if (!kind) kind = canB ? 'bersih' : canA ? 'asli' : null;
-  if (kind === 'bersih' && (!canB || (i != null && K.cut[i]))) kind = canA ? 'asli' : null;
-  if (!kind) { toast(m.audio.asli || m.audio.bersih ? 'Bagian ini tidak bisa diputar dari audio yang ada' : 'Rekaman asli tidak ditemukan di lokasi awalnya', null, 'bad'); return; }
+  let kind = kSrc();
+  if (!kind) { toast('Tidak ada audio yang bisa diputar untuk rapat ini', null, 'bad'); return; }
+  let moved = false;
+  if (kind === 'bersih' && i != null && K.cut[i]) {
+    if (!m.audio.asli) { toast('Bagian ini tidak ada di Audio bersih, dan Rekaman asli tidak ditemukan', null, 'bad'); return; }
+    if (!(K.ask && K.ask.i === i && performance.now() < K.ask.until)) {
+      K.ask = { i, until: performance.now() + 5000 };
+      toast('Bagian ini tidak ada di Audio bersih. Klik sekali lagi untuk memutarnya dari Rekaman asli.', null, 'info');
+      return;
+    }
+    K.ask = null; kUseSrc('asli', true); kind = 'asli'; moved = true;
+  }
   const src = audioUrl(m.id, kind), t = kind === 'bersih' ? kToClean(o) + 0.001 : o;
   const wasPlaying = !audio.paused;
   stopAt = null;
@@ -1418,7 +1467,7 @@ function kSeek(o, play, i) {
     if (play || wasPlaying) audio.play().catch(() => toast('Audio tidak bisa diputar', null, 'bad'));
     karUpdate(true); patchAudio();
   });
-  if (audio.dataset.src !== src || (play && !wasPlaying)) setTimeout(render, 60);
+  if (moved || audio.dataset.src !== src || (play && !wasPlaying)) setTimeout(render, 60);
 }
 function kStep(d) {
   if (!K.data || !K.data.segments.length) return;
@@ -1427,7 +1476,12 @@ function kStep(d) {
   let j;
   if (K.cur < 0) j = 0;
   else if (d < 0 && o != null && o - segs[K.cur].start > 1) j = K.cur;
-  else { const p = K.ord.indexOf(K.cur) + d; j = K.ord[Math.max(0, Math.min(K.ord.length - 1, p))]; }
+  else {
+    const skip = kSrc() === 'bersih' && kMapUsable();
+    let p = K.ord.indexOf(K.cur) + d;
+    while (skip && p >= 0 && p < K.ord.length && K.cut[K.ord[p]]) p += d;
+    j = K.ord[Math.max(0, Math.min(K.ord.length - 1, p))];
+  }
   kSeek(segs[j].start, false, j);
 }
 audio.addEventListener('play', () => { if (S.route.view === 'audio') kLoop(); });
@@ -1922,9 +1976,16 @@ const A = {
   aplay(el) {
     const kind = el.dataset.a, src = audioUrl(curMid(), kind);
     if (audio.dataset.src === src && !audio.paused) { audio.pause(); render(); return; }
+    const was = S.route.view === 'audio' ? kKind() : null;
+    if (was && was !== kind && kPos() != null) {
+      const o = kPos(); stopAt = null;
+      seekTo(src, kind === 'bersih' ? kToClean(o) + 0.001 : o, () => audio.play().catch(() => toast('Audio tidak bisa diputar')));
+      setTimeout(render, 50); return;
+    }
     if (audio.dataset.src !== src) { audio.src = src; audio.dataset.src = src; }
     stopAt = null; audio.play().catch(() => toast('Audio tidak bisa diputar')); setTimeout(render, 50);
   },
+  asrc(el) { kSetSrc(el.dataset.a); },
   // diff
   dmode(el) { S.diff.mode = el.dataset.v; render(); },
   dnav(el) {
@@ -2137,15 +2198,21 @@ document.addEventListener('keydown', ev => {
   // ← → move the audio position: editor, Audio tab, or a focused position bar
   if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && !typing && !S.modal && !ev.metaKey && !ev.ctrlKey && !ev.altKey && S.m && S.route.name === 'meeting') {
     const d = (ev.key === 'ArrowLeft' ? -1 : 1) * (ev.shiftKey ? 30 : 5);
-    const kind = t.dataset && t.dataset.scrub ? t.dataset.scrub : inEd ? 'asli' : S.route.view === 'audio' ? (audio.dataset.src === audioUrl(S.m.id, 'bersih') ? 'bersih' : 'asli') : null;
+    const kind = t.dataset && t.dataset.scrub ? t.dataset.scrub : inEd ? 'asli' : S.route.view === 'audio' ? kSrc() : null;
     if (kind && (kind !== 'asli' || (S.m.audio && S.m.audio.asli))) { ev.preventDefault(); nudge(kind, d); return; }
   }
   if (S.route.name === 'meeting' && S.route.view === 'audio' && S.m && K.data && !typing && !S.modal && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
     const k = ev.key;
     if (k === ' ') {
       ev.preventDefault();
-      const kind = kKind() || (S.m.audio.bersih ? 'bersih' : S.m.audio.asli ? 'asli' : null);
+      const kind = kSrc();
       if (kind) A.aplay({ dataset: { a: kind } });
+      return;
+    }
+    if (k === 's' || k === 'S') {
+      ev.preventDefault();
+      const b = document.querySelector(`[data-act="asrc"][data-a="${kSrc() === 'bersih' ? 'asli' : 'bersih'}"]`);
+      if (b && !b.disabled) kSetSrc(b.dataset.a);
       return;
     }
     if (k === 'ArrowUp' || k === 'ArrowDown') { ev.preventDefault(); kStep(k === 'ArrowUp' ? -1 : 1); return; }
