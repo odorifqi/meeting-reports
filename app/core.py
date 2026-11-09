@@ -332,8 +332,9 @@ def save_audio_m4a(audio: np.ndarray, path: Path) -> None:
     subprocess.run(cmd, input=pcm, capture_output=True, check=True)
 
 
-def chunk_bounds(clean: CleanResult, chunk_sec: float = CHUNK_SEC) -> list[tuple[int, int]]:
+def chunk_bounds(clean: CleanResult, chunk_sec: float | None = None) -> list[tuple[int, int]]:
     """Split the cleaned audio into ~chunk_sec pieces, cutting only where silence was removed."""
+    chunk_sec = chunk_sec or CHUNK_SEC
     n = len(clean.audio)
     if n == 0:
         return []

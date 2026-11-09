@@ -33,3 +33,13 @@ def test_docx_bold_with_italic_inside(tmp_path):
     assert ("Kelemahan half space", True, False) in runs
     assert ("miring", False, True) in runs
     assert "*" not in "".join(t for t, _, _ in runs)
+
+
+def test_chunk_bounds_reads_chunk_sec_when_called(monkeypatch):
+    import numpy as np
+    clean = core.CleanResult(audio=np.zeros(core.SR * 100, dtype=np.float32), regions=[(0.0, 100.0)],
+                             original_sec=100.0, threshold_db=-40.0,
+                             mapping=[(float(t), float(t), 10.0) for t in range(0, 100, 10)])
+    assert len(core.chunk_bounds(clean)) == 1
+    monkeypatch.setattr(core, "CHUNK_SEC", 20)
+    assert len(core.chunk_bounds(clean)) == 5
