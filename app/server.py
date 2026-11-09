@@ -29,7 +29,7 @@ import sync
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.6.4"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"

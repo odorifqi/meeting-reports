@@ -5,6 +5,7 @@ are imported lazily inside the functions that need them.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import math
@@ -12,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -388,20 +390,51 @@ def whisper_prompt(vocabulary: str = "", participants: list[str] | None = None) 
     return " ".join(parts) if parts else None
 
 
+@contextlib.contextmanager
+def carry_initial_prompt(module):
+    """Give every 30 s window the initial prompt, not only the first one.
+
+    NOTE: with condition_on_previous_text=False, mlx-whisper (0.4.x) resets the prompt after
+    each window, so the vocabulary and participant names reached only the first 30 s of a
+    chunk. The transcribe loop builds DecodingOptions(prompt=...) per window: the first
+    non-empty prompt is the initial prompt, and later empty prompts get it back.
+    """
+    original = module.DecodingOptions
+    first: list[int] = []
+
+    def options(**kwargs):
+        prompt = kwargs.get("prompt")
+        if prompt:
+            if not first:
+                first.extend(prompt)
+        elif first:
+            kwargs["prompt"] = list(first)
+        return original(**kwargs)
+
+    module.DecodingOptions = options
+    try:
+        yield
+    finally:
+        module.DecodingOptions = original
+
+
 def transcribe_chunk(audio: np.ndarray, language: str | None, prompt: str | None,
                      repo: str = WHISPER_REPO, word_confidence: bool = True) -> list[dict]:
     """Transcribe one chunk. Times are relative to the chunk start (clean timeline)."""
     import mlx_whisper  # Apple Silicon only
 
-    result = mlx_whisper.transcribe(
-        audio,
-        path_or_hf_repo=repo,
-        language=language or None,
-        condition_on_previous_text=False,   # avoids repeated-phrase loops
-        initial_prompt=prompt,
-        word_timestamps=word_confidence,
-        verbose=None,
-    )
+    # NOTE: the package attribute mlx_whisper.transcribe is the function; the loop module sits in sys.modules
+    loop = sys.modules["mlx_whisper.transcribe"]
+    with carry_initial_prompt(loop) if prompt else contextlib.nullcontext():
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=repo,
+            language=language or None,
+            condition_on_previous_text=False,   # avoids repeated-phrase loops
+            initial_prompt=prompt,
+            word_timestamps=word_confidence,
+            verbose=None,
+        )
     out = []
     for s in result.get("segments", []):
         text = s.get("text", "").strip()
