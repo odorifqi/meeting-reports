@@ -654,3 +654,38 @@ def test_launcher_stops_paused_meeting_report_group(monkeypatch):
     assert main.is_meeting_report("/Users/x/Library/Application Support/MeetingNotes/venv/bin/python "
                                   "/Users/x/Library/Application Support/MeetingNotes/app/server.py")
     assert not main.is_meeting_report("/usr/bin/python -m uvicorn server:app --port 8765")
+
+
+def test_suggest_job_reports_each_step(env):
+    c, st, jb, src = env
+    mid = c.post("/api/meetings", json={"source_path": str(src)}).json()["id"]
+    wait(jb)
+    ed = c.get(f"/api/meetings/{mid}/editor").json()
+    c.post(f"/api/meetings/{mid}/save", json={"segments": ed["base"]["segments"],
+                                              "participants": ed["base"]["participants"]})
+    seen = []
+    emit = jb._emit
+    jb._emit = lambda m, **ev: (seen.append(ev), emit(m, **ev))
+    jb.claude = lambda *a: (seen.append({"call": st.meta(mid)["suggest_job"]["phase"]}), fake_claude(*a))[1]
+
+    assert c.post(f"/api/meetings/{mid}/suggest", json={"confirmed": True}).status_code == 200
+    wait(jb)
+    steps = [e.get("call") or e["job"]["phase"] or e["state"] for e in seen if e.get("kind") == "suggest" or "call" in e]
+    assert steps == ["wait", "wait", "match", "ready"]
+    first = next(e["job"] for e in seen if e.get("kind") == "suggest")
+    assert first["words"] > 0 and first["masked"] == 1 and first["model"]
+    job = c.get(f"/api/meetings/{mid}").json()["suggest_job"]
+    assert job["state"] == "ready" and job["count"] == 1
+
+    jb.api_key = lambda p=None: ""
+    c.post(f"/api/meetings/{mid}/suggest", json={"confirmed": True})
+    wait(jb)
+    job = c.get(f"/api/meetings/{mid}").json()["suggest_job"]
+    assert job["state"] == "failed" and "API key" in job["error"]
+
+    # quit while the request runs: the next start shows a failure, not an endless wait
+    st.update(mid, suggest_job={"state": "running", "phase": "wait"})
+    jb.recover()
+    assert st.meta(mid)["suggest_job"]["state"] == "failed"
+    jb.recover()
+    assert st.meta(mid)["suggest_job"] is None

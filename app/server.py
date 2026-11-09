@@ -29,7 +29,7 @@ import sync
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.3"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
@@ -662,6 +662,7 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         if job_on(mid):
             raise HTTPException(409, "Rapat ini sedang diproses")
         model = body.get("model").strip() if _model_ok(body.get("model")) else None
+        st.update(mid, suggest_job={"state": "queued", "at": store_mod.now_iso()})
         jb.submit("suggest", mid, model=model)
         return {"ok": True}
 

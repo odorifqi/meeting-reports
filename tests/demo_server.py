@@ -1,6 +1,7 @@
 """Run the real server with fake Whisper and Claude, for UI checks without a Mac.
 
     python tests/demo_server.py /tmp/demo-root
+    MN_DEMO_AI_SEC=20 MN_DEMO_AI_FAIL="Server tidak menjawab." python tests/demo_server.py
 """
 import os
 import sys
@@ -79,7 +80,9 @@ def fake_words(text, a, b):
 
 
 def fake_claude(system, user, key, model, max_tokens):
-    time.sleep(1.5)
+    time.sleep(float(os.environ.get("MN_DEMO_AI_SEC", "1.5")))
+    if os.environ.get("MN_DEMO_AI_FAIL"):
+        raise RuntimeError(os.environ["MN_DEMO_AI_FAIL"])
     if "JSON array" in system:
         return ('[{"id":"s00003","from":"sembilan puluh dua persen","to":"92%","reason":"angka"},'
                 '{"id":"s00004","from":"tiga koma satu persen","to":"3,1%","reason":"angka"}]')

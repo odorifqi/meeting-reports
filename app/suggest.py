@@ -114,14 +114,17 @@ def parse_claude(text: str) -> list[dict]:
 
 
 def claude_suggestions(meta: dict, version: dict, cfg: dict, api_key: str, model: str,
-                       vocabulary: str = "", call=core.ai_text) -> tuple[list[dict], dict]:
+                       vocabulary: str = "", call=core.ai_text, send: dict | None = None,
+                       on_reply=None) -> tuple[list[dict], dict]:
     """Ask the AI provider for word fixes. Returns (suggestions, send info for the send log)."""
-    send = filters.build_send(meta, version, cfg, with_ids=True)
+    send = send or filters.build_send(meta, version, cfg, with_ids=True)
     user = f"<info_rapat>\n{send['header']}\n</info_rapat>\n\n"
     if vocabulary.strip():
         user += f"<istilah>\n{filters.Redactor(cfg.get('redact'), filters.split_words(cfg.get('sensitive_words', ''))).apply(vocabulary)}\n</istilah>\n\n"
     user += f"<transkrip>\n{send['transcript']}\n</transkrip>"
     raw = call(CLAUDE_SYSTEM, user, api_key, model, 4000)
+    if on_reply:
+        on_reply()
     by_id = {s["id"]: s for s in version.get("segments", [])}
     out = []
     for d in parse_claude(raw):

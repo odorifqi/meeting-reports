@@ -95,7 +95,7 @@ const S = {
   shist: { left: null, right: 'latest', L: null, R: null },
   modal: null, ctx: '', prev: null, prevOpen: false,
   toast: null, s2: null, settings: null, sendlog: [], keyEdit: false, keyMsg: '',
-  recent: [], logOpen: false, waitSuggest: null, busy: false,
+  recent: [], logOpen: false, busy: false,
 };
 let theme = 'system';
 try { theme = localStorage.getItem('mn-theme') || 'system'; } catch (e) { /* storage blocked */ }
@@ -203,13 +203,16 @@ async function openMeeting(r) {
   if (prevId !== m.id) { S.vsel = 'latest'; S.ssel = 'latest'; S.s6q = ''; S.s6spk = 'all'; S.ed = null; S.sum = null; S.ctx = ''; }
   let view = r.view;
   if (view === 'auto') {
-    view = { queued: 'progres', transcribing: 'progres', failed: 'progres', awaiting_review: 'tinjau', summarizing: 'meringkas' }[m.status] || 'transkrip';
+    view = { queued: 'progres', transcribing: 'progres', failed: 'progres', awaiting_review: 'tinjau', summarizing: 'meringkas' }[m.status] || (sugBusy(m) ? 'saran' : 'transkrip');
     history.replaceState(null, '', mhash(m.id, view));
     S.route.view = view;
   }
   if (view === 'transkrip') await loadVersion(S.vsel);
   if (view === 'ringkasan') await loadSummary(S.ssel);
   if (view === 'audio') await syncLoad(true);
+  if (view === 'saran' && !sugBusy(m) && (m.suggest_job || {}).state !== 'failed') {
+    view = 'edit'; history.replaceState(null, '', mhash(m.id, view)); S.route.view = view;
+  }
   if (view === 'tinjau' || view === 'edit') { if (!S.ed || S.ed.mid !== m.id || S.ed.stale) await loadEditor(view); }
   if (view === 'bandingkan' && (!S.ed || S.ed.mid !== m.id)) await loadEditor(m.transcript_rev ? 'edit' : 'tinjau');
   if (view === 'bandingkan') await loadDiffLeft();
@@ -237,10 +240,14 @@ function onEvent(ev) {
     if (S.route.view === 'progres' && (durs || prev.phase !== ev.progress.phase)) render(); else patchProgress();
   }
   if (ev.kind === 'log' && cur && S.m) { (S.m.log = S.m.log || []).push({ t: fmtClock(new Date()) + ':' + pad(new Date().getSeconds()), text: ev.text }); patchLog(); }
-  if (ev.kind === 'suggest' && S.waitSuggest === ev.mid && ev.state !== 'running') {
-    S.waitSuggest = null;
-    if (ev.state === 'ready') { toast(`${ev.count} saran AI siap ditinjau`); if (S.ed) S.ed.stale = true; go(mhash(ev.mid, 'edit')); return; }
-    toast('Saran AI gagal. Lihat pesan di editor.', null, 'bad');
+  if (ev.kind === 'suggest' && cur && ev.job) {
+    S.m.suggest_job = ev.job;
+    const v = S.route.view;
+    if (ev.state === 'ready') {
+      toast(`${ev.count} saran AI siap ditinjau`);
+      if (v === 'saran' || v === 'edit') { (async () => { await saveDraft(); if (S.ed) S.ed.stale = true; go(mhash(ev.mid, 'edit')); })(); return; }
+    } else if (ev.state === 'failed' && v !== 'saran') toast('Saran AI gagal. Lihat pesan di editor.', null, 'bad');
+    if (v === 'saran' || v === 'edit') render();
   }
   refreshT = setTimeout(async () => {
     try {
@@ -640,9 +647,6 @@ function scrubHTML(kind, pos, len, id) {
 function editorHTML() {
   const e = S.ed, m = S.m;
   if (!e) return loadingHTML();
-  if (S.waitSuggest === m.id) {
-    return tb(ttl('Saran AI', esc(m.title)), '') + `<div class="pane" style="display:flex"><div class="center"><div class="s5"><span class="spinner lg" style="color:var(--claude)"></span><h2>Meminta saran dari ${esc(AI().provider_short)}…</h2><p>Teks sudah difilter di Mac ini. Saran akan tampil di editor dan tidak ada yang diterapkan sebelum Anda klik Terima.</p></div></div></div>`;
-  }
   const X = edCtx(e);
   const isB = e.mode === 'edit';
   const dirty = edDirty(e);
@@ -685,7 +689,7 @@ function editorHTML() {
   `<div class="ed"><div class="ed-main">
   <div class="ebar"><label class="srch"><span class="sr">Cari</span>${ic('search')}<input class="field" id="ed-find" style="width:150px" placeholder="Cari (⌘F)" value="${esc(e.find)}" data-in="find" aria-describedby="find-cnt"></label><span class="fcount" id="find-cnt" aria-live="polite">${e.find ? (nh ? `${X.cur + 1} dari ${num(nh)}` : 'Tidak ada') : ''}</span><button class="iconb" data-act="findNav" data-v="-1" aria-label="Hasil sebelumnya (Shift+Enter)" title="Sebelumnya (Shift+Enter)"${nh ? '' : ' disabled'}>${ic('up')}</button><button class="iconb" data-act="findNav" data-v="1" aria-label="Hasil berikutnya (Enter)" title="Berikutnya (Enter)"${nh ? '' : ' disabled'}>${ic('down')}</button><label class="chk" title="Sembunyikan segmen yang tidak memuat kata ini"><input type="checkbox" data-ch="onlyHits"${e.onlyHits ? ' checked' : ''}${e.find ? '' : ' disabled'}>Hanya baris cocok</label><input class="field" id="ed-repl" style="width:120px" placeholder="Ganti dengan" value="${esc(e.repl)}" data-in="repl" aria-label="Ganti dengan"><button class="btn" data-act="replOne" id="repl1-btn"${nh ? '' : ' disabled'}>Ganti</button><button class="btn" data-act="replAll" id="repl-btn"${nh ? '' : ' disabled'}>Ganti semua${nh ? ` (${nh})` : ''}</button></div>
   <div class="ebar"><button class="btn ghost" data-act="merge" title="Satukan segmen terpilih dengan segmen tepat di bawahnya">${ic('merge')}Gabung dengan bawah</button><button class="btn ghost" data-act="split" title="Klik di dalam teks dulu, lalu pecah di posisi kursor">${ic('split')}Pecah di kursor</button><button class="btn ghost" data-act="insSeg" title="Sisipkan segmen kosong di bawah segmen terpilih">${ic('ins')}Sisipkan segmen</button><button class="btn ghost" data-act="delSeg" title="Hapus segmen terpilih (⌫)">${ic('trash')}Hapus</button><span class="sepv"></span><button class="btn ghost" data-act="secret" id="sec-btn" title="Tandai segmen ini rahasia (tidak dikirim ke layanan AI)">${ic('lock')}${selSegO && selSegO.secret ? 'Hapus rahasia' : 'Rahasia'}</button></div>
-  <div class="ebar" style="background:var(--panel)"><span class="pill p-warn">${ic('pencil', 'sm')}${loc} saran lokal</span>${cl ? `<span class="pill p-claude">${ic('spark', 'sm')}${cl} saran AI</span>` : ''}<button class="btn" data-act="acceptAll"${open.length ? '' : ' disabled'}>Terima semua</button><button class="btn ghost" data-act="rejectAll"${open.length ? '' : ' disabled'}>Tolak semua</button><label class="chk" title="Garis bawahi kata yang Whisper kurang yakin. Tidak ada kata pengganti, dengarkan potongannya."><input type="checkbox" data-ch="doubt"${e.doubt ? ' checked' : ''}${nDoubt ? '' : ' disabled'}>Tandai kata ragu (${num(nDoubt)})</label><span style="flex:1"></span>${m.claude_suggest ? claudePill(m.claude_suggest) : ''}${!claudeReview && isB && m.transcript_rev ? `<button class="btn claude" data-act="openM1">${ic('spark')}Minta saran AI</button>` : ''}</div>
+  <div class="ebar" style="background:var(--panel)"><span class="pill p-warn">${ic('pencil', 'sm')}${loc} saran lokal</span>${cl ? `<span class="pill p-claude">${ic('spark', 'sm')}${cl} saran AI</span>` : ''}<button class="btn" data-act="acceptAll"${open.length ? '' : ' disabled'}>Terima semua</button><button class="btn ghost" data-act="rejectAll"${open.length ? '' : ' disabled'}>Tolak semua</button><label class="chk" title="Garis bawahi kata yang Whisper kurang yakin. Tidak ada kata pengganti, dengarkan potongannya."><input type="checkbox" data-ch="doubt"${e.doubt ? ' checked' : ''}${nDoubt ? '' : ' disabled'}>Tandai kata ragu (${num(nDoubt)})</label><span style="flex:1"></span>${m.claude_suggest ? claudePill(m.claude_suggest) : ''}${!claudeReview && isB && m.transcript_rev ? (sugBusy(m) ? `<button class="btn" data-go="${mhash(m.id, 'saran')}"><span class="spinner" style="color:var(--accent)"></span>Saran AI sedang dibuat</button>` : `<button class="btn claude" data-act="openM1">${ic('spark')}Minta saran AI</button>`) : ''}</div>
   ${draftBanner}${sugFail}${gapBanner}
   <div class="player"><button class="pbtn" id="pl-btn" data-act="playMain" aria-label="${e.play !== -1 ? 'Jeda' : 'Putar'}"${X.audio ? '' : ' disabled'}>${ic(e.play !== -1 ? 'pause' : 'play')}</button><span class="mono" style="font-size:12px" id="pl-ts">${fmtTs(cursor)}</span>${scrubHTML('asli', cursor, len, 'pl-bar')}<span class="mono muted" style="font-size:12px">${fmtDur(len)}</span><span class="muted" style="font-size:12px">${X.audio ? 'Rekaman asli' : 'Rekaman asli tidak ditemukan'}</span></div>
   <div class="seglist" data-keep="seglist" id="seglist">${list}</div>${qpHTML(e)}</div>
@@ -1514,6 +1518,30 @@ function S5() {
   <ul class="steps"><li><span class="stp done">${ic('check', 'sm')}</span>${num(p.masked)} data sensitif disamarkan, ${num(p.withheld)} segmen rahasia ditahan</li><li><span class="stp done">${ic('check', 'sm')}</span>${num(p.words)} kata ${AI().local ? 'diproses model lokal di Mac ini' : `dikirim ke ${esc(AI().provider_short)}`}</li><li><span class="stp ${done ? 'done' : 'run'}">${done ? ic('check', 'sm') : '<span class="spinner" style="width:10px;height:10px"></span>'}</span>${done ? '' : '<b>'}Menunggu ringkasan dari ${esc(p.model || '')}${done ? '' : '</b>'}</li><li><span class="stp ${done ? 'run' : ''}">${done ? '<span class="spinner" style="width:10px;height:10px"></span>' : ''}</span><span class="${done ? '' : 'muted2'}">Memulihkan kata yang disamarkan, di Mac ini</span></li></ul></div></div></div>`;
 }
 
+/* ------------------------------------------------------------------ S5s saran AI */
+const sugBusy = m => ['queued', 'running'].includes((m.suggest_job || {}).state);
+const sugElapsed = j => { const t = Math.max(0, Math.round((Date.now() - Date.parse(j.at)) / 1000)); return `${Math.floor(t / 60)}:${pad(t % 60)}`; };
+function S5s() {
+  const m = S.m, j = m.suggest_job || {}, back = mhash(m.id, 'edit');
+  const head = tb(ttl('Saran AI', esc(m.title)), '', back);
+  if (j.state === 'failed') {
+    return head + `<div class="pane" style="display:flex"><div class="center"><div class="s5"><div class="glyph" style="background:var(--bad-bg);color:var(--bad)">${ic('warn', 'lg')}</div><h2>Saran AI belum bisa dibuat</h2><p>${esc(j.error || '')} Transkrip tidak berubah.</p><div style="display:flex;gap:8px"><button class="btn" data-go="#/pengaturan">Buka Pengaturan</button><button class="btn pri" data-act="openM1">Coba lagi</button></div></div></div></div>`;
+  }
+  if (!sugBusy(m)) return loadingHTML();
+  const ph = j.phase, match = ph === 'match';
+  const run = '<span class="spinner" style="width:10px;height:10px"></span>';
+  const queued = j.state === 'queued'
+    ? '<li><span class="stp run">' + run + '</span><b>Menunggu giliran, pekerjaan lain sedang berjalan</b></li>' : '';
+  const steps = j.state === 'queued' ? queued
+    : `<li><span class="stp done">${ic('check', 'sm')}</span>${num(j.masked)} data sensitif disamarkan, ${num(j.withheld)} segmen rahasia ditahan</li><li><span class="stp done">${ic('check', 'sm')}</span>${num(j.words)} kata ${AI().local ? 'diproses model lokal di Mac ini' : `dikirim ke ${esc(AI().provider_short)}`}</li><li><span class="stp ${match ? 'done' : 'run'}">${match ? ic('check', 'sm') : run}</span>${match ? '' : '<b>'}Menunggu saran dari ${esc(j.model || '')}${match ? '' : '</b>'} <span class="muted2 mono" id="sug-el">${sugElapsed(j)}</span></li><li><span class="stp ${match ? 'run' : ''}">${match ? run : ''}</span><span class="${match ? '' : 'muted2'}">Mencocokkan saran ke transkrip, di Mac ini</span></li>`;
+  return head + `<div class="pane" style="display:flex"><div class="center"><div class="s5"><span class="spinner lg" style="color:var(--accent)"></span><h2>Meminta saran dari ${esc(AI().provider_short)}…</h2><p>Tidak ada yang diterapkan sebelum Anda klik Terima. Aman kembali ke editor, saran tetap diproses.</p>
+  <ul class="steps">${steps}</ul></div></div></div>`;
+}
+setInterval(() => {
+  const el = S.route.view === 'saran' && S.m && S.m.suggest_job && S.m.suggest_job.at && document.getElementById('sug-el');
+  if (el) el.textContent = sugElapsed(S.m.suggest_job);
+}, 1000);
+
 /* ------------------------------------------------------------------ S6e / S6f riwayat versi */
 async function loadHist(kind) {
   const m = S.m;
@@ -1702,6 +1730,7 @@ function screenHTML() {
       case 'tinjau': case 'edit': return editorHTML();
       case 'bandingkan': return S4c();
       case 'meringkas': return S5();
+      case 'saran': return S5s();
       case 'ringkasan': return S6b();
       case 'audio': return S6c();
       case 'riwayat-transkrip': return histScreen('tr');
@@ -1907,9 +1936,9 @@ const A = {
   async sendM1() {
     try {
       await post(`/api/meetings/${encodeURIComponent(curMid())}/suggest`, { confirmed: true });
-      S.modal = null; S.waitSuggest = curMid();
-      if (!S.ed || S.ed.mid !== curMid()) await loadEditor('edit');
-      go(mhash(curMid(), 'edit'));
+      S.modal = null;
+      await saveDraft();
+      go(mhash(curMid(), 'saran'));
     } catch (e) { fail(e); }
   },
   async onlyT() { S.modal = null; toast('Transkrip disimpan tanpa ringkasan'); go(mhash(curMid(), 'transkrip')); },
@@ -2191,7 +2220,7 @@ document.addEventListener('keydown', ev => {
     if (S.editTitle) { S.editTitle = false; render(); return; }
     if (S.ed && S.ed.ren >= 0) { S.ed.ren = -1; render(); return; }
   }
-  const inEd = S.route.name === 'meeting' && (S.route.view === 'tinjau' || S.route.view === 'edit') && S.ed && !S.waitSuggest;
+  const inEd = S.route.name === 'meeting' && (S.route.view === 'tinjau' || S.route.view === 'edit') && S.ed;
   if ((ev.metaKey || ev.ctrlKey) && ev.key === 's' && inEd) { ev.preventDefault(); if (t.blur) t.blur(); saveTranscript(); return; }
   if ((ev.metaKey || ev.ctrlKey) && ev.key === 'f' && inEd) { ev.preventDefault(); const f = $('#ed-find'); if (f) { f.focus(); f.select(); } return; }
   const typing = t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName);

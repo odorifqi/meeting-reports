@@ -187,6 +187,9 @@ class Jobs:
             elif m.get("status") == "summarizing":
                 self.store.update(mid, status=m.get("prev_status") or "transcript_only", progress=None,
                                   summary_error="Aplikasi ditutup saat ringkasan dibuat. Coba lagi.")
+            elif (m.get("suggest_job") or {}).get("state") in ("queued", "running"):
+                self.store.update(mid, suggest_job={"state": "failed",
+                                                    "error": "Aplikasi ditutup saat saran AI dibuat. Coba lagi."})
             elif m.get("suggest_job"):
                 self.store.update(mid, suggest_job=None)
 
@@ -410,25 +413,31 @@ class Jobs:
         provider = core.provider_id(cfg)
         pname = core.provider_name(cfg, provider)
         model = model or core.provider_model(cfg, provider)
-        st.update(mid, suggest_job={"state": "running", "at": store_mod.now_iso()})
-        self._emit(mid, kind="suggest", state="running")
+        job = {"state": "running", "phase": "wait", "at": store_mod.now_iso(), "model": model}
+
+        def step(**changes) -> None:
+            job.update(changes)
+            st.update(mid, suggest_job=dict(job))
+            self._emit(mid, kind="suggest", state=job["state"], job=dict(job), count=job.get("count"))
+
         try:
+            v = st.latest(mid)
+            send = filters.build_send(m, v, cfg, with_ids=True)
+            step(masked=send["masked"], withheld=send["withheld"], words=send["words"])
             key = self.api_key(provider)
             if not key:
                 raise RuntimeError(f"API key {pname} belum diisi. Buka Pengaturan.")
-            v = st.latest(mid)
             vocab = (m.get("settings") or {}).get("vocabulary", "") or cfg.get("vocabulary", "")
-            items, send = suggest.claude_suggestions(m, v, cfg, key, model, vocab, call=self.claude)
+            items, send = suggest.claude_suggestions(m, v, cfg, key, model, vocab, call=self.claude, send=send,
+                                                     on_reply=lambda: step(phase="match"))
             st.log_send(mid, {"kind": "suggest", "provider": provider, "model": model, "words": send["words"], "masked": send["masked"],
                               "withheld": send["withheld"], "rev": m.get("transcript_rev")})
             store_mod._write_json(st.path(mid) / "saran-claude.json",
                                   {"at": store_mod.now_iso(), "based_on_rev": m.get("transcript_rev"),
                                    "provider": provider, "model": model, "items": items})
-            st.update(mid, suggest_job={"state": "ready", "count": len(items), "at": store_mod.now_iso()})
-            self._emit(mid, kind="suggest", state="ready", count=len(items))
+            step(state="ready", phase=None, count=len(items), at=store_mod.now_iso())
         except Exception as exc:  # noqa: BLE001
-            st.update(mid, suggest_job={"state": "failed", "error": _friendly(exc, pname)})
-            self._emit(mid, kind="suggest", state="failed")
+            step(state="failed", phase=None, error=_friendly(exc, pname))
 
 
 def _friendly(exc: Exception, provider: str = "Anthropic") -> str:
