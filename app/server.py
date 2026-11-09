@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import secrets
 import shutil
@@ -28,10 +29,13 @@ import sync
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.2"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
+SHELL_COOKIE = "mn_shell"
+CSP = ("default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; "
+       "script-src 'self'{eval}; connect-src 'self'; frame-ancestors 'none'")
 AUDIO_EXT = {".m4a", ".mp3", ".wav", ".aac", ".mp4", ".mov", ".caf", ".aiff", ".aif", ".flac", ".ogg",
              ".webm", ".m4v", ".qta", ".mkv", ".avi", ".opus"}
 EDITABLE_SETTINGS = {"claude_model", "remove_silence", "min_silence_sec", "save_clean_audio", "language",
@@ -76,6 +80,23 @@ def ai_info(cfg: dict) -> dict:
     }
 
 
+def json_safe(x):
+    """NaN and inf become null: JSON has no such numbers, and one in a meeting file broke a whole request."""
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    if isinstance(x, dict):
+        return {k: json_safe(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [json_safe(v) for v in x]
+    return x
+
+
+class SafeJSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        return json.dumps(json_safe(content), ensure_ascii=False, allow_nan=False,
+                          separators=(",", ":")).encode("utf-8")
+
+
 def session_token() -> str:
     env = os.environ.get("MN_TOKEN")
     if env:
@@ -107,7 +128,8 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
     tok = token or session_token()
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     origins = {f"http://{h}" for h in hosts}
-    app = FastAPI(title="Meeting Report", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Meeting Report", docs_url=None, redoc_url=None, openapi_url=None,
+                  default_response_class=SafeJSONResponse)
     app.state.store, app.state.jobs, app.state.token = st, jb, tok
     app.state.clients = 0
     app.state.last_seen = time.time()
@@ -136,9 +158,10 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
         resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Referrer-Policy"] = "no-referrer"
         if path == "/" or path.endswith(".html"):
-            resp.headers["Content-Security-Policy"] = (
-                "default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; "
-                "script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+            # NOTE: pywebview runs every evaluate_js (also its DOM drop events) through eval().
+            # Only the app window gets 'unsafe-eval'; a browser in dev mode keeps the strict policy.
+            app_window = request.query_params.get("shell") == "app" or request.cookies.get(SHELL_COOKIE) == "app"
+            resp.headers["Content-Security-Policy"] = CSP.format(eval=" 'unsafe-eval'" if app_window else "")
         return resp
 
     # ------------------------------------------------------------------ page
@@ -154,6 +177,8 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
                                 status_code=401)
         resp = FileResponse(STATIC / "index.html", media_type="text/html")
         resp.set_cookie(COOKIE, tok, httponly=True, samesite="strict", path="/")
+        if request.query_params.get("shell") == "app":
+            resp.set_cookie(SHELL_COOKIE, "app", httponly=True, samesite="strict", path="/")
         return resp
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")

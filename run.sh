@@ -22,23 +22,49 @@ ensure_venv() {
 }
 
 if_running_stop() {
-  if curl -fs "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+  if curl -fs -m 2 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
     echo "Server Meeting Report (versi terpasang) sedang jalan di port $PORT. Menghentikannya dulu..."
     pkill -f "MeetingNotes/app/server.py" || true
     sleep 1
   fi
 }
 
+port_free_or_exit() {
+  local pid pgid
+  pid=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)
+  if [[ -n "$pid" ]]; then
+    pgid=$(ps -o pgid= -p "$pid" | tr -d ' ' || true)
+    echo "Port $PORT masih dipakai proses lain:"
+    ps -o pid=,stat=,command= -p "$pid" || true
+    echo "STAT T = proses dijeda (misalnya karena Ctrl+Z). Hentikan seluruh grup prosesnya dengan:"
+    echo "  kill -CONT -- -${pgid:-$pid}; kill -- -${pgid:-$pid}"
+    exit 1
+  fi
+}
+
+open_when_ready() {
+  for _ in $(seq 1 120); do
+    if curl -fs -m 2 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+      echo "Server siap. Membuka browser..."
+      open -a "Google Chrome" "$1" 2>/dev/null || open "$1"
+      return
+    fi
+    sleep 0.5
+  done
+  echo "Server belum menjawab setelah 60 detik. Buka tautan di atas secara manual."
+}
+
 case "${1:-dev}" in
   dev)
     ensure_venv
     if_running_stop
+    port_free_or_exit
     TOKEN=$("$VENV/bin/python" -c "import sys; sys.path.insert(0,'app'); import server; print(server.session_token())")
     URL="http://127.0.0.1:$PORT/?t=$TOKEN"
     echo ""
     echo "Meeting Report (dev) -> $URL"
-    echo "Tekan Ctrl+C untuk berhenti."
-    (sleep 2; open -a "Google Chrome" "$URL" 2>/dev/null || open "$URL") &
+    echo "Terminal ini tetap diam selama server jalan. Tekan Ctrl+C untuk berhenti (jangan Ctrl+Z: itu hanya menjeda dan port tetap terpakai)."
+    open_when_ready "$URL" &
     exec "$VENV/bin/uvicorn" server:app --app-dir app --reload --reload-dir app \
       --host 127.0.0.1 --port "$PORT" --log-level warning --no-access-log
     ;;

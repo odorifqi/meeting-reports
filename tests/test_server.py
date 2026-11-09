@@ -563,3 +563,94 @@ def test_retranscribe_drops_padding_echo(env):
     r = c.post(f"/api/meetings/{mid}/retranscribe", json={"start": 3.0, "end": 12.0}).json()
     assert [s["text"] for s in r["segments"]] == ["isi celah"] and r["outside"] == 2
     assert r["segments"][0]["start"] == 6.0
+
+
+def test_nan_in_meeting_file_does_not_break_json(env):
+    """A NaN anywhere in meeting.json gave 'Out of range float values are not JSON compliant: nan'."""
+    c, st, jb, src = env
+    mid = c.post("/api/meetings", json={"source_path": str(src), "title": "Durasi NaN"}).json()["id"]
+    wait(jb)
+    f = st.path(mid) / "meeting.json"
+    data = json.loads(f.read_text())
+    data["duration"] = float("nan")
+    data["extra_inf"] = [float("inf"), {"x": float("-inf")}]
+    f.write_text(json.dumps(data))
+    for url in (f"/api/meetings/{mid}", "/api/state"):
+        r = c.get(url)
+        assert r.status_code == 200, url
+    assert server.json_safe({"a": [float("nan"), 1.5, {"b": float("inf")}]}) == {"a": [None, 1.5, {"b": None}]}
+
+
+def test_csp_eval_only_for_app_window(env):
+    c, *_ = env
+    browser = TestClient(c.app, base_url="http://127.0.0.1:8765")
+    r = browser.get(f"/?t={TOKEN}")
+    assert "unsafe-eval" not in r.headers["content-security-policy"]
+    window = TestClient(c.app, base_url="http://127.0.0.1:8765")
+    r = window.get(f"/?t={TOKEN}&shell=app")
+    assert "'unsafe-eval'" in r.headers["content-security-policy"]
+    r = window.get("/")
+    assert "'unsafe-eval'" in r.headers["content-security-policy"]
+
+
+def test_launcher_reports_busy_port(monkeypatch):
+    import socket
+    import main
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen()
+        monkeypatch.setattr(main, "PORT", s.getsockname()[1])
+        assert main.port_in_use()
+        monkeypatch.setattr(main, "port_owner",
+                            lambda: ("6511", "6511", "PID 6511 (dijeda, mis. karena Ctrl+Z): uvicorn server:app"))
+        msg = main.port_busy_message()
+    assert "kill -CONT -- -6511; kill -- -6511" in msg
+    assert not main.port_in_use()
+
+
+def test_launcher_moves_to_spare_port_for_other_app(monkeypatch, tmp_path):
+    import socket
+    import main
+
+    monkeypatch.setattr(core, "SUPPORT_DIR", tmp_path)
+    with socket.socket() as other, socket.socket() as probe:
+        other.bind(("127.0.0.1", 0))
+        other.listen()
+        busy = other.getsockname()[1]
+        probe.bind(("127.0.0.1", 0))
+        spare = probe.getsockname()[1]
+        probe.close()
+        monkeypatch.setattr(main, "PORT", busy)
+        monkeypatch.setattr(main, "SPARE_PORTS", [busy, spare])
+        monkeypatch.setattr(main, "health", lambda: {"server": "other app"})
+        main.free_port()
+        assert main.PORT == spare
+        assert (tmp_path / "port").read_text() == str(spare)
+
+
+def test_launcher_stops_paused_meeting_report_group(monkeypatch):
+    import signal
+    import subprocess
+    import sys
+    import main
+
+    code = ("import socket,time; s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(); "
+            "print(s.getsockname()[1], flush=True); time.sleep(60)")
+    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        port = int(proc.stdout.readline())
+        os_pgid = str(proc.pid)
+        import os
+        os.killpg(proc.pid, signal.SIGSTOP)
+        monkeypatch.setattr(main, "PORT", port)
+        assert main.port_in_use()
+        assert main.stop_group(os_pgid)
+        assert not main.port_in_use()
+    finally:
+        proc.kill()
+        proc.wait()
+    assert main.is_meeting_report("/Users/x/meeting-report/.venv/bin/python .venv/bin/uvicorn server:app --reload")
+    assert main.is_meeting_report("/Users/x/Library/Application Support/MeetingNotes/venv/bin/python "
+                                  "/Users/x/Library/Application Support/MeetingNotes/app/server.py")
+    assert not main.is_meeting_report("/usr/bin/python -m uvicorn server:app --port 8765")
