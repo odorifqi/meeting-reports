@@ -253,7 +253,7 @@ function onEvent(ev) {
     try {
       await loadState();
       if (S.route.name === 'list') await loadList();
-      if (cur && (['status', 'done', 'queued'].includes(ev.kind) || (ev.kind === 'version' && S.route.view === 'audio'))) {
+      if (cur && (['status', 'done', 'queued', 'suggest'].includes(ev.kind) || (ev.kind === 'version' && S.route.view === 'audio'))) {
         const before = S.m.status;
         S.m = await api(`/api/meetings/${encodeURIComponent(ev.mid)}`);
         const v = S.route.view;
@@ -577,6 +577,22 @@ function changeList(c) {
 function visibleSugs(e, seg) {
   return e.sugs.map((s, j) => ({ s, j })).filter(x => x.s.seg_id === seg.id && x.s.st === 'open' && x.s.to && (seg.text || '').includes(x.s.from));
 }
+function sugList(e) {
+  const out = [];
+  e.segs.forEach((g, i) => visibleSugs(e, g).forEach(({ j }) => out.push({ i, j })));
+  return out;
+}
+function sugStep(d) {
+  const e = S.ed, list = sugList(e); if (!list.length) return;
+  const at = e.sugAt || { i: e.sel, j: -1 };
+  const after = x => x.i > at.i || (x.i === at.i && x.j > at.j);
+  const before = x => x.i < at.i || (x.i === at.i && x.j < at.j);
+  const t = d > 0 ? (list.find(after) || list[0]) : (list.filter(before).pop() || list[list.length - 1]);
+  e.sugAt = t; e.sel = t.i;
+  render();
+  const el = $(`#sgg-${t.j}`) || $(`#sg-${t.i}`);
+  if (el) { el.scrollIntoView({ block: 'center' }); el.classList.add('pulse'); setTimeout(() => el.classList.remove('pulse'), 900); }
+}
 function doubtWords(e, seg) {
   const t = seg.text || '';
   return (e.low[seg.id] || []).filter(w => new RegExp(`(^|[^\\p{L}\\p{N}])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\p{L}\\p{N}])`, 'iu').test(t));
@@ -623,7 +639,7 @@ function segRow(e, g, i, X) {
     ${pills ? `<div class="meta2">${pills}</div>` : ''}
     ${on && e.parts.length ? `<div class="hint">${ic('person', 'sm')}<span>Tekan ${e.parts.slice(0, 9).map((p, j) => `<kbd>${j + 1}</kbd>`).join(' ')} untuk menandai, <kbd>0</kbd> hapus tanda${e.parts.length > 9 ? ', <kbd>P</kbd> cari nama' : ', <kbd>P</kbd> pilih nama'}</span><span class="tagmsg" id="tagmsg" role="status">${flash ? `${ic('check', 'sm')}${esc(e.flash.text)}` : ''}</span></div>` : ''}
     ${g.secret ? `<div class="secret"><span class="pill p-neutral">${ic('lock', 'sm')}Rahasia · tidak dikirim ke layanan AI</span><button class="btn ghost" style="height:20px;font-size:11px" data-act="secret" data-i="${i}">Hapus tanda</button></div>` : ''}
-    ${visibleSugs(e, g).map(({ s, j }) => `<div class="sgg${s.kind === 'claude' ? ' cl' : ''}"><span class="src ${s.kind === 'claude' ? 'c' : 'l'}">${ic(s.kind === 'claude' ? 'spark' : 'pencil', 'sm')}${s.kind === 'claude' ? 'Saran AI' : 'Saran lokal'}</span><span class="grow"><s>${esc(s.from)}</s> menjadi <b>${esc(s.to)}</b> <span class="muted">· ${esc(s.reason)}</span></span><button class="btn" data-act="sugOk" data-j="${j}">Terima</button><button class="btn ghost" data-act="sugNo" data-j="${j}">Tolak</button>${s.kind === 'local' ? `<button class="btn ghost" data-act="sugTerm" data-j="${j}">Tambah ke istilah</button>` : ''}</div>`).join('')}
+    ${visibleSugs(e, g).map(({ s, j }) => `<div class="sgg${s.kind === 'claude' ? ' cl' : ''}" id="sgg-${j}"><span class="src ${s.kind === 'claude' ? 'c' : 'l'}">${ic(s.kind === 'claude' ? 'spark' : 'pencil', 'sm')}${s.kind === 'claude' ? 'Saran AI' : 'Saran lokal'}</span><span class="grow"><s>${esc(s.from)}</s> menjadi <b>${esc(s.to)}</b> <span class="muted">· ${esc(s.reason)}</span></span><button class="btn" data-act="sugOk" data-j="${j}">Terima</button><button class="btn ghost" data-act="sugNo" data-j="${j}">Tolak</button>${s.kind === 'local' ? `<button class="btn ghost" data-act="sugTerm" data-j="${j}">Tambah ke istilah</button>` : ''}</div>`).join('')}
     </div>`;
 }
 function gapRow(g, k, X) {
@@ -653,6 +669,7 @@ function editorHTML() {
   const nChg = dirty ? edChanges(e).n : 0;
   const open = e.sugs.filter(s => s.st === 'open' && s.to && (e.segs.find(g => g.id === s.seg_id) || { text: '' }).text.includes(s.from));
   const loc = open.filter(s => s.kind === 'local').length, cl = open.filter(s => s.kind === 'claude').length;
+  const sl = sugList(e), sk = e.sugAt ? sl.findIndex(x => x.j === e.sugAt.j) : -1;
   const nDoubt = doubtCount(e);
   const nh = X.hits.length;
   const selSegO = e.segs[e.sel] || e.segs[0];
@@ -689,7 +706,7 @@ function editorHTML() {
   `<div class="ed"><div class="ed-main">
   <div class="ebar"><label class="srch"><span class="sr">Cari</span>${ic('search')}<input class="field" id="ed-find" style="width:150px" placeholder="Cari (⌘F)" value="${esc(e.find)}" data-in="find" aria-describedby="find-cnt"></label><span class="fcount" id="find-cnt" aria-live="polite">${e.find ? (nh ? `${X.cur + 1} dari ${num(nh)}` : 'Tidak ada') : ''}</span><button class="iconb" data-act="findNav" data-v="-1" aria-label="Hasil sebelumnya (Shift+Enter)" title="Sebelumnya (Shift+Enter)"${nh ? '' : ' disabled'}>${ic('up')}</button><button class="iconb" data-act="findNav" data-v="1" aria-label="Hasil berikutnya (Enter)" title="Berikutnya (Enter)"${nh ? '' : ' disabled'}>${ic('down')}</button><label class="chk" title="Sembunyikan segmen yang tidak memuat kata ini"><input type="checkbox" data-ch="onlyHits"${e.onlyHits ? ' checked' : ''}${e.find ? '' : ' disabled'}>Hanya baris cocok</label><input class="field" id="ed-repl" style="width:120px" placeholder="Ganti dengan" value="${esc(e.repl)}" data-in="repl" aria-label="Ganti dengan"><button class="btn" data-act="replOne" id="repl1-btn"${nh ? '' : ' disabled'}>Ganti</button><button class="btn" data-act="replAll" id="repl-btn"${nh ? '' : ' disabled'}>Ganti semua${nh ? ` (${nh})` : ''}</button></div>
   <div class="ebar"><button class="btn ghost" data-act="merge" title="Satukan segmen terpilih dengan segmen tepat di bawahnya">${ic('merge')}Gabung dengan bawah</button><button class="btn ghost" data-act="split" title="Klik di dalam teks dulu, lalu pecah di posisi kursor">${ic('split')}Pecah di kursor</button><button class="btn ghost" data-act="insSeg" title="Sisipkan segmen kosong di bawah segmen terpilih">${ic('ins')}Sisipkan segmen</button><button class="btn ghost" data-act="delSeg" title="Hapus segmen terpilih (⌫)">${ic('trash')}Hapus</button><span class="sepv"></span><button class="btn ghost" data-act="secret" id="sec-btn" title="Tandai segmen ini rahasia (tidak dikirim ke layanan AI)">${ic('lock')}${selSegO && selSegO.secret ? 'Hapus rahasia' : 'Rahasia'}</button></div>
-  <div class="ebar" style="background:var(--panel)"><span class="pill p-warn">${ic('pencil', 'sm')}${loc} saran lokal</span>${cl ? `<span class="pill p-claude">${ic('spark', 'sm')}${cl} saran AI</span>` : ''}<button class="btn" data-act="acceptAll"${open.length ? '' : ' disabled'}>Terima semua</button><button class="btn ghost" data-act="rejectAll"${open.length ? '' : ' disabled'}>Tolak semua</button><label class="chk" title="Garis bawahi kata yang Whisper kurang yakin. Tidak ada kata pengganti, dengarkan potongannya."><input type="checkbox" data-ch="doubt"${e.doubt ? ' checked' : ''}${nDoubt ? '' : ' disabled'}>Tandai kata ragu (${num(nDoubt)})</label><span style="flex:1"></span>${m.claude_suggest ? claudePill(m.claude_suggest) : ''}${!claudeReview && isB && m.transcript_rev ? (sugBusy(m) ? `<button class="btn" data-go="${mhash(m.id, 'saran')}"><span class="spinner" style="color:var(--accent)"></span>Saran AI sedang dibuat</button>` : `<button class="btn claude" data-act="openM1">${ic('spark')}Minta saran AI</button>`) : ''}</div>
+  <div class="ebar" style="background:var(--panel)"><span class="pill p-warn">${ic('pencil', 'sm')}${loc} saran lokal</span>${cl ? `<span class="pill p-claude">${ic('spark', 'sm')}${cl} saran AI</span>` : ''}<span class="fcount" id="sug-cnt" aria-live="polite">${sl.length ? (sk >= 0 ? `Saran ${sk + 1} dari ${num(sl.length)}` : `${num(sl.length)} saran`) : ''}</span><button class="iconb" data-act="sugNav" data-v="-1" aria-label="Saran sebelumnya (Shift+N)" title="Saran sebelumnya (Shift+N)"${sl.length ? '' : ' disabled'}>${ic('up')}</button><button class="iconb" data-act="sugNav" data-v="1" aria-label="Saran berikutnya (N)" title="Saran berikutnya (N)"${sl.length ? '' : ' disabled'}>${ic('down')}</button><button class="btn" data-act="acceptAll"${open.length ? '' : ' disabled'}>Terima semua</button><button class="btn ghost" data-act="rejectAll"${open.length ? '' : ' disabled'}>Tolak semua</button><label class="chk" title="Garis bawahi kata yang Whisper kurang yakin. Tidak ada kata pengganti, dengarkan potongannya."><input type="checkbox" data-ch="doubt"${e.doubt ? ' checked' : ''}${nDoubt ? '' : ' disabled'}>Tandai kata ragu (${num(nDoubt)})</label><span style="flex:1"></span>${m.claude_suggest ? claudePill(m.claude_suggest) : ''}${!claudeReview && (!isB || m.transcript_rev) ? (sugBusy(m) ? `<button class="btn" data-go="${mhash(m.id, 'saran')}"><span class="spinner" style="color:var(--accent)"></span>Saran AI sedang dibuat</button>` : (isB ? `<button class="btn claude" data-act="openM1">${ic('spark')}Minta saran AI</button>` : `<button class="btn claude" data-act="saveM1"${cleanSegs(e.segs).length ? '' : ' disabled'} title="Transkrip disimpan sebagai versi 1, lalu Anda memeriksa apa yang dikirim">${ic('spark')}Minta saran AI</button>`)) : ''}</div>
   ${draftBanner}${sugFail}${gapBanner}
   <div class="player"><button class="pbtn" id="pl-btn" data-act="playMain" aria-label="${e.play !== -1 ? 'Jeda' : 'Putar'}"${X.audio ? '' : ' disabled'}>${ic(e.play !== -1 ? 'pause' : 'play')}</button><span class="mono" style="font-size:12px" id="pl-ts">${fmtTs(cursor)}</span>${scrubHTML('asli', cursor, len, 'pl-bar')}<span class="mono muted" style="font-size:12px">${fmtDur(len)}</span><span class="muted" style="font-size:12px">${X.audio ? 'Rekaman asli' : 'Rekaman asli tidak ditemukan'}</span></div>
   <div class="seglist" data-keep="seglist" id="seglist">${list}</div>${qpHTML(e)}</div>
@@ -697,7 +714,7 @@ function editorHTML() {
   ${e.parts.length > 1 ? `<span class="muted" style="font-size:11.5px">Urutan menentukan tombol 1–9. Peserta ke-10 dan seterusnya: tekan <kbd>P</kbd> lalu ketik namanya, atau pilih di kolom nama segmen.</span>` : ''}
   <input class="field" id="ed-padd" placeholder="＋ Tambah peserta, lalu Enter" data-enter="padd" aria-label="Tambah peserta">
   ${e.parts.length ? `<div style="display:grid;gap:6px;border-top:1px solid var(--line);padding-top:12px"><div style="font-size:12px"><b>Belum ditandai:</b> <span class="mono" id="un-cnt">${num(un)}</span> dari ${num(total)}</div><div class="bar thin"><i id="un-bar" style="width:${total ? (100 - un / total * 100).toFixed(1) : 0}%"></i></div><button class="btn" data-act="nextUn" id="next-un"${un ? '' : ' disabled'}>${ic('down')}Lompat ke berikutnya</button><label class="chk"><input type="checkbox" data-ch="autoNext"${e.autoNext ? ' checked' : ''}>Setelah menandai, pindah ke segmen berikutnya</label><span class="muted" style="font-size:11.5px">Penandaan tidak wajib. Segmen tanpa tanda ditulis “Belum ditandai”.</span></div>` : ''}
-  <div class="sc" style="border-top:1px solid var(--line);padding-top:12px;margin-top:auto"><b style="color:var(--fg)">Pintasan</b><div><kbd>↑</kbd><kbd>↓</kbd> pilih segmen</div><div><kbd>Spasi</kbd> putar potongan</div><div><kbd>←</kbd><kbd>→</kbd> geser audio 5 dtk (<kbd>Shift</kbd> 30)</div><div><kbd>1</kbd>–<kbd>9</kbd> tandai · <kbd>0</kbd> hapus · <kbd>P</kbd> cari nama</div><div><kbd>Enter</kbd> edit teks · <kbd>Esc</kbd> selesai</div><div><kbd>⌫</kbd> hapus segmen · <kbd>⌘</kbd><kbd>F</kbd> cari</div><div><kbd>⌘</kbd><kbd>S</kbd> simpan</div></div>
+  <div class="sc" style="border-top:1px solid var(--line);padding-top:12px;margin-top:auto"><b style="color:var(--fg)">Pintasan</b><div><kbd>N</kbd> saran berikutnya · <kbd>⇧</kbd><kbd>N</kbd> sebelumnya</div><div><kbd>↑</kbd><kbd>↓</kbd> pilih segmen</div><div><kbd>Spasi</kbd> putar potongan</div><div><kbd>←</kbd><kbd>→</kbd> geser audio 5 dtk (<kbd>Shift</kbd> 30)</div><div><kbd>1</kbd>–<kbd>9</kbd> tandai · <kbd>0</kbd> hapus · <kbd>P</kbd> cari nama</div><div><kbd>Enter</kbd> edit teks · <kbd>Esc</kbd> selesai</div><div><kbd>⌫</kbd> hapus segmen · <kbd>⌘</kbd><kbd>F</kbd> cari</div><div><kbd>⌘</kbd><kbd>S</kbd> simpan</div></div>
   </aside></div>`;
 }
 let draftT = null;
@@ -1689,10 +1706,10 @@ function sheet() {
   const m = S.m || {};
   const nWords = S.prev ? num(S.prev.words) : '…';
   if (S.modal === 'm1') return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t"><h2 id="sh-t"><span class="ico" style="background:var(--claude-bg);color:var(--claude)">${ic('spark', 'lg')}</span>${AI().local ? 'Minta saran dari model lokal?' : `Kirim transkrip ke ${esc(AI().provider_short)} untuk saran?`}</h2>
-  <p>${sendTxt(nWords)} Model membaca transkrip versi ${m.transcript_rev} dan daftar istilah penting, lalu mengusulkan perbaikan salah dengar dan ejaan.</p>${keyWarn()}${filtHTML()}
+  ${S.m1Back ? `<div class="ok">${ic('check', 'sm')}Transkrip versi ${m.transcript_rev} sudah tersimpan. Periksa yang dikirim, lalu kirim.</div>` : ''}<p>${sendTxt(nWords)} Model membaca transkrip versi ${m.transcript_rev} dan daftar istilah penting, lalu mengusulkan perbaikan salah dengar dan ejaan.</p>${keyWarn()}${filtHTML()}
   <p>Opsional. Usulan tampil sebagai saran di editor, dan tidak ada yang diterapkan sebelum Anda klik Terima. Rapat ini lalu diberi tanda <b style="color:var(--claude)">${ic('spark', 'sm')} Disarankan AI</b>.</p>
-  <div class="acts"><button class="btn lg" data-act="close">Batal</button><button class="btn pri lg" data-act="sendM1"${S.state && S.state.api_key ? '' : ' disabled'}>Kirim dan minta saran</button></div></div>`;
-  if (S.modal === 'm2') return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t"><div class="ok">${ic('check', 'sm')}Transkrip versi ${m.transcript_rev} tersimpan</div><h2 id="sh-t">Buat ringkasan rapat sekarang?</h2>
+  <div class="acts"><button class="btn lg" data-act="close">${S.m1Back ? 'Batal, kembali ke editor' : 'Batal'}</button><button class="btn pri lg" data-act="sendM1"${S.state && S.state.api_key ? '' : ' disabled'}>Kirim dan minta saran</button></div></div>`;
+  if (S.modal === 'm2') return `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sh-t"><button class="iconb sh-x" data-act="onlyT" aria-label="Tutup" title="Tutup (Esc)">${ic('x')}</button><div class="ok">${ic('check', 'sm')}<span class="grow">Transkrip versi ${m.transcript_rev} sudah tersimpan. Langkah berikut opsional.</span><button class="btn ghost" data-act="backEd">${ic('left', 'sm')}Kembali ke editor</button></div><h2 id="sh-t">Buat ringkasan rapat sekarang?</h2>
   <p>Untuk membuat ringkasan, ${sendTxt(nWords)}</p>${keyWarn()}
   <div><div class="fgl">Konteks tambahan (opsional)</div><textarea class="field" id="ctx-m2" rows="2" style="width:100%" placeholder="Misalnya: fokus ke keputusan dan action item per wilayah" data-in="ctx">${esc(S.ctx)}</textarea></div>${filtHTML()}
   <div class="acts">${m.claude_suggest ? `<span class="sp">${claudePill(m.claude_suggest)}</span>` : `<button class="btn lg claude sp" data-act="openM1">${ic('spark')}Minta saran AI dulu</button>`}<button class="btn lg" data-act="onlyT">Transkrip Saja</button><button class="btn pri lg" data-act="startSum"${S.state && S.state.api_key ? '' : ' disabled'}>Buat Ringkasan</button></div></div>`;
@@ -1747,7 +1764,7 @@ function render() {
   const sel = fid && ae.selectionStart != null ? [ae.selectionStart, ae.selectionEnd] : null;
   const keep = {};
   app.querySelectorAll('[data-keep]').forEach(el => { keep[el.dataset.keep] = el.scrollTop; });
-  app.innerHTML = `<div class="win">${sidebar()}<main class="content">${screenHTML()}</main>${S.modal ? `<div class="scrim" data-act="close"></div>${sheet()}` : ''}${toastHTML()}</div>`;
+  app.innerHTML = `<div class="win">${sidebar()}<main class="content">${screenHTML()}</main>${S.modal ? `<div class="scrim"${S.modal === 'm2' ? '' : ' data-act="close"'}></div>${sheet()}` : ''}${toastHTML()}</div>`;
   app.querySelectorAll('[data-keep]').forEach(el => { if (keep[el.dataset.keep] != null) el.scrollTop = keep[el.dataset.keep]; });
   if (fid) { const el = document.getElementById(fid); if (el) { el.focus(); if (sel && el.setSelectionRange) try { el.setSelectionRange(sel[0], sel[1]); } catch (e) { /* not text */ } } }
   const ren = app.querySelector('[id^="ren-"]'); if (ren && !fid) ren.focus();
@@ -1758,7 +1775,9 @@ function render() {
 /* ------------------------------------------------------------------ actions */
 const curMid = () => S.m && S.m.id;
 const A = {
-  close() { S.modal = null; S.prevOpen = false; render(); },
+  close() { const back = S.m1Back; S.modal = null; S.prevOpen = false; S.m1Back = false; if (back) go(mhash(curMid(), 'edit')); else render(); },
+  backEd() { S.modal = null; S.prevOpen = false; go(mhash(curMid(), 'edit')); },
+  async saveM1() { await saveTranscript(true); },
   toSettings() { S.modal = null; go('#/pengaturan'); },
   undo() { const u = S.toast && S.toast.undo; S.toast = null; patchToast(); if (u) u(); },
   reload() { route(); },
@@ -1860,8 +1879,9 @@ const A = {
     toast('Segmen manual disisipkan di celah. Ketik isinya.', undo, 'info');
   },
   gapSkip(el) { S.ed.gapSkip[(+el.dataset.a).toFixed(1)] = true; render(); },
-  gapNext() { const g = document.querySelector('.gaprow'); if (g) { g.scrollIntoView({ block: 'center' }); g.classList.add('pulse'); setTimeout(() => g.classList.remove('pulse'), 900); } },
+  gapNext() { const all = document.querySelectorAll('.gaprow'); if (!all.length) return; const e = S.ed; e.gapK = ((e.gapK ?? -1) + 1) % all.length; const g = all[e.gapK]; { g.scrollIntoView({ block: 'center' }); g.classList.add('pulse'); setTimeout(() => g.classList.remove('pulse'), 900); } },
   findNav(el) { findStep(+el.dataset.v); },
+  sugNav(el) { sugStep(+el.dataset.v); },
   qpPick(el) { const e = S.ed; e.qp = null; render(); tagSel(el.dataset.id); },
   revSeg(el, ev) { ev.stopPropagation(); const e = S.ed, g = e.segs[+el.dataset.i]; g.text = e.orig[g.id]; edTouched(true); },
   secret(el, ev) { ev.stopPropagation(); const e = S.ed; const g = e.segs[el.dataset.i != null ? +el.dataset.i : e.sel]; if (g) { g.secret = !g.secret; edTouched(true); } },
@@ -1936,7 +1956,7 @@ const A = {
   async sendM1() {
     try {
       await post(`/api/meetings/${encodeURIComponent(curMid())}/suggest`, { confirmed: true });
-      S.modal = null;
+      S.modal = null; S.m1Back = false;
       await saveDraft();
       go(mhash(curMid(), 'saran'));
     } catch (e) { fail(e); }
@@ -2103,7 +2123,7 @@ function moveParticipant(from, to) {
   return true;
 }
 function markSel() { document.querySelectorAll('.sg.on').forEach(x => x.classList.remove('on')); const el = $(`#sg-${S.ed.sel}`); if (el) el.classList.add('on'); }
-async function saveTranscript() {
+async function saveTranscript(thenSuggest) {
   const e = S.ed, m = S.m; if (!e) return;
   clearTimeout(draftT);
   const dirty = edDirty(e);
@@ -2120,6 +2140,7 @@ async function saveTranscript() {
     stopAudio();
     const r = await post(`/api/meetings/${encodeURIComponent(m.id)}/save`, { segments: cleanSegs(e.segs), participants: e.parts, claude });
     S.m = r.meeting; S.ed = null; S.vsel = 'latest';
+    if (e.mode === 'review' && thenSuggest) { S.modalNext = 'm1'; S.m1Back = true; S.prevOpen = false; S.prev = null; go(mhash(m.id, 'transkrip')); loadPreview(); return; }
     if (e.mode === 'review') { S.modalNext = 'm2'; S.prevOpen = false; S.prev = null; go(mhash(m.id, 'transkrip')); loadPreview(); return; }
     if (!r.changed) { toast('Tidak ada perubahan, versi tidak bertambah'); go(mhash(m.id, 'transkrip')); return; }
     if (S.m.summary_count) { S.lastSave = local; S.modalNext = 'm5'; go(mhash(m.id, 'transkrip')); return; }
@@ -2266,6 +2287,7 @@ document.addEventListener('keydown', ev => {
   else if (ev.key === 'Enter') { ev.preventDefault(); const el = document.querySelector(`[data-ed="${e.sel}"]`); if (el) { el.focus(); const r = document.createRange(); r.selectNodeContents(el); r.collapse(false); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); } }
   else if (/^[1-9]$/.test(ev.key)) { const p = e.parts[+ev.key - 1]; if (p) tagSel(p.id); }
   else if (ev.key === '0') tagSel(null);
+  else if (ev.key === 'n' || ev.key === 'N') { ev.preventDefault(); sugStep(ev.shiftKey ? -1 : 1); }
 });
 document.addEventListener('focusout', ev => { if (ev.target.dataset && ev.target.dataset.ed != null) setTimeout(() => { if (!document.activeElement || document.activeElement.dataset.ed == null) render(); }, 0); });
 // drag a participant row to change the order (keys 1–9 follow the order)
