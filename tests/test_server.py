@@ -689,3 +689,51 @@ def test_suggest_job_reports_each_step(env):
     assert st.meta(mid)["suggest_job"]["state"] == "failed"
     jb.recover()
     assert st.meta(mid)["suggest_job"] is None
+
+
+def test_index_carries_saved_theme(env):
+    c, *_ = env
+    browser = TestClient(c.app, base_url="http://127.0.0.1:8765")
+    assert "data-theme" not in browser.get(f"/?t={TOKEN}").text
+    core.save_config({**core.load_config(), "theme": "dark"})
+    assert '<html data-theme="dark" lang="id">' in browser.get(f"/?t={TOKEN}").text
+
+
+def test_launcher_window_theme(tmp_path, monkeypatch):
+    import main
+
+    monkeypatch.setattr(core, "SUPPORT_DIR", tmp_path)
+    monkeypatch.setattr(main, "macos_dark", lambda: True)
+    assert main.window_theme() == "dark"
+    monkeypatch.setattr(main, "macos_dark", lambda: False)
+    assert main.window_theme() == "light"
+    core.save_config({**core.load_config(), "theme": "dark"})
+    assert main.window_theme() == "dark"
+    page = main.loader_html("dark")
+    assert main.THEME_COLORS["dark"]["bg"] in page and "setStatus" in page and "showError" in page
+    assert "<svg" in page
+
+
+def test_launcher_ensure_server_reports_steps(monkeypatch):
+    import main
+
+    up = []
+    steps = []
+    monkeypatch.setattr(main, "healthy", lambda: bool(up))
+    monkeypatch.setattr(main, "health", lambda: None)
+    monkeypatch.setattr(main, "stop_old_server", lambda: None)
+    monkeypatch.setattr(main, "free_port", lambda: None)
+    monkeypatch.setattr(main, "start_server", lambda: up.append(1))
+    main.ensure_server(steps.append)
+    assert steps == ["Menyalakan server…"] and up
+    steps.clear()
+    main.ensure_server(steps.append)
+    assert steps == []
+
+    def broken():
+        raise RuntimeError("Port 8765 sudah dipakai")
+
+    up.clear()
+    monkeypatch.setattr(main, "start_server", broken)
+    with pytest.raises(RuntimeError, match="8765"):
+        main.ensure_server()

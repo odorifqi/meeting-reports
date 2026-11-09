@@ -29,7 +29,7 @@ import sync
 import store as store_mod
 import suggest
 
-APP_VERSION = "1.6.4"
+APP_VERSION = "1.6.5"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"
@@ -175,7 +175,13 @@ def create_app(store: store_mod.Store | None = None, jobs: jobs_mod.Jobs | None 
                                 "<h3>Sesi tidak valid</h3><p>Buka Meeting Report dari aplikasinya, atau jalankan "
                                 "<code>./run.sh dev</code> lalu buka tautan yang dicetak di Terminal.</p>",
                                 status_code=401)
-        resp = FileResponse(STATIC / "index.html", media_type="text/html")
+        page = (STATIC / "index.html").read_text(encoding="utf-8")
+        theme = core.load_config().get("theme", "system")
+        if theme in ("light", "dark"):
+            # NOTE: the CSP blocks inline scripts, so the saved theme goes into the page here; otherwise
+            # the loading screen follows macOS until app.js runs.
+            page = page.replace("<html ", f'<html data-theme="{theme}" ', 1)
+        resp = HTMLResponse(page)
         resp.set_cookie(COOKIE, tok, httponly=True, samesite="strict", path="/")
         if request.query_params.get("shell") == "app":
             resp.set_cookie(SHELL_COOKIE, "app", httponly=True, samesite="strict", path="/")
