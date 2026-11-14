@@ -536,6 +536,7 @@ window.MR_I18N = {
   "sug.prev": {"id": "Saran sebelumnya (Shift+N)", "en": "Previous suggestion (Shift+N)"},
   "sug.queued": {"id": "Menunggu giliran, pekerjaan lain sedang berjalan", "en": "Waiting for its turn, another job is running"},
   "sug.ready": {"id": "{n} saran AI siap ditinjau", "en": {"one": "{n} AI suggestion is ready for review", "other": "{n} AI suggestions are ready for review"}},
+  "sug.ready_partial": {"id": "{n} saran AI siap ditinjau. Jawaban AI terpotong, jadi sebagian saran mungkin tidak ada.", "en": {"one": "{n} AI suggestion is ready for review. The AI answer was cut off, so some suggestions can be missing.", "other": "{n} AI suggestions are ready for review. The AI answer was cut off, so some suggestions can be missing."}},
   "sug.waiting": {"id": "Menunggu saran dari {m}", "en": "Waiting for suggestions from {m}"},
   "sum.ctx": {"id": "Konteks tambahan (opsional)", "en": "More context (optional)"},
   "sum.ctx_ph": {"id": "Misalnya: fokus pada keputusan dan action item", "en": "For example: focus on decisions and action items"},

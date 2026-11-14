@@ -31,7 +31,7 @@ import store as store_mod
 import suggest
 from i18n import tr
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 PORT = int(os.environ.get("MN_PORT", "8765"))
 STATIC = Path(__file__).parent / "static"
 COOKIE = "mn_session"

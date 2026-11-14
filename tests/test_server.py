@@ -713,6 +713,25 @@ def test_suggest_job_reports_each_step(env):
     assert first["words"] > 0 and first["masked"] == 1 and first["model"]
     job = c.get(f"/api/meetings/{mid}").json()["suggest_job"]
     assert job["state"] == "ready" and job["count"] == 1
+    assert not job["partial"]
+    reply = json.loads((st.path(mid) / "saran-claude-reply.json").read_text())
+    assert reply["complete"] and reply["received"] == 1 and "restrukturasi" in reply["raw"]
+
+    # an answer that cannot be read is an error with the raw answer kept, not "0 suggestions"
+    jb.claude = lambda *a: "Maaf, saya tidak bisa membantu."
+    c.post(f"/api/meetings/{mid}/suggest", json={"confirmed": True})
+    wait(jb)
+    job = c.get(f"/api/meetings/{mid}").json()["suggest_job"]
+    assert job["state"] == "failed" and "saran-claude-reply.json" in job["error"]
+    assert json.loads((st.path(mid) / "saran-claude-reply.json").read_text())["raw"].startswith("Maaf")
+    assert json.loads((st.path(mid) / "saran-claude.json").read_text())["items"]   # last good list stays
+
+    # cut off after one whole suggestion: kept, and the job says partial
+    jb.claude = lambda *a: '[{"id":"s00001","from":"restrukturasi","to":"restrukturisasi","reason":"x"},{"id":'
+    c.post(f"/api/meetings/{mid}/suggest", json={"confirmed": True})
+    wait(jb)
+    job = c.get(f"/api/meetings/{mid}").json()["suggest_job"]
+    assert job["state"] == "ready" and job["count"] == 1 and job["partial"]
 
     jb.api_key = lambda p=None: ""
     c.post(f"/api/meetings/{mid}/suggest", json={"confirmed": True})

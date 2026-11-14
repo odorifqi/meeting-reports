@@ -129,7 +129,7 @@ applyTheme(theme);
 function toast(text, undo, kind) {
   S.toast = { text, undo, kind: kind || 'ok' };
   clearTimeout(toast.h);
-  toast.h = setTimeout(() => { S.toast = null; patchToast(); }, undo ? 6000 : kind === 'bad' ? 5000 : 2800);
+  toast.h = setTimeout(() => { S.toast = null; patchToast(); }, undo || text.length > 60 ? 6000 : kind === 'bad' ? 5000 : 2800);
   patchToast();
 }
 function toastHTML() {
@@ -263,7 +263,7 @@ function onEvent(ev) {
     S.m.suggest_job = ev.job;
     const v = S.route.view;
     if (ev.state === 'ready') {
-      toast(_t('sug.ready', { n: ev.count }));
+      toast(_t(ev.job.partial ? 'sug.ready_partial' : 'sug.ready', { n: ev.count }), null, ev.job.partial ? 'info' : undefined);
       if (v === 'saran' || v === 'edit') { (async () => { await saveDraft(); if (S.ed) S.ed.stale = true; go(mhash(ev.mid, 'edit')); })(); return; }
     } else if (ev.state === 'failed' && v !== 'saran') toast(_t('sug.failed'), null, 'bad');
     if (v === 'saran' || v === 'edit') render();

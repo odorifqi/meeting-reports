@@ -103,40 +103,85 @@ Kalau tidak ada yang perlu diusulkan, jawab [].
 """
 
 
-def parse_claude(text: str) -> list[dict]:
-    m = re.search(r"\[.*\]", text or "", re.S)
+SUGGEST_MAX_TOKENS = 16000   # NOTE: a long transcript with many fixes overflows 4000 and cuts the JSON
+
+
+class SuggestReplyError(RuntimeError):
+    """The AI answered, but no suggestion list could be read from the answer."""
+
+    def __init__(self, msg: str, raw: str = ""):
+        super().__init__(msg)
+        self.raw = raw
+
+
+def parse_claude(text: str) -> tuple[list[dict], bool]:
+    """Read the JSON array of suggestions. Returns (items, complete).
+
+    An answer cut off by the token limit has no closing "]": every object that is
+    already whole is still kept, and complete is False. No "[" at all, or an array
+    that cannot be read, raises SuggestReplyError, so the user sees an error and not
+    "0 suggestions"."""
+    text = text or ""
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"\[", text):
+        try:
+            data, _ = dec.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if isinstance(data, list) and all(isinstance(d, dict) for d in data):
+            return data, True
+    m = re.search(r"\[\s*\{", text)
     if not m:
-        return []
-    try:
-        data = json.loads(m.group(0))
-    except ValueError:
-        return []
-    return [d for d in data if isinstance(d, dict)]
+        raise SuggestReplyError(tr("sug_reply_unreadable"), text)
+    items, i = [], m.start() + 1
+    while True:
+        j = text.find("{", i)
+        if j < 0:
+            break
+        try:
+            obj, i = dec.raw_decode(text, j)
+        except ValueError:
+            break
+        if isinstance(obj, dict):
+            items.append(obj)
+    if not items and "]" in text[m.start():]:
+        raise SuggestReplyError(tr("sug_reply_unreadable"), text)
+    return items, False
 
 
 def claude_suggestions(meta: dict, version: dict, cfg: dict, api_key: str, model: str,
                        vocabulary: str = "", call=core.ai_text, send: dict | None = None,
-                       on_reply=None) -> tuple[list[dict], dict]:
-    """Ask the AI provider for word fixes. Returns (suggestions, send info for the send log)."""
+                       on_reply=None) -> tuple[list[dict], dict, dict]:
+    """Ask the AI provider for word fixes.
+
+    Returns (suggestions, send info for the send log, reply info). Reply info keeps the
+    raw answer, whether it was complete, and how many items did not match the transcript."""
     send = send or filters.build_send(meta, version, cfg, with_ids=True)
     user = f"<info_rapat>\n{send['header']}\n</info_rapat>\n\n"
     if vocabulary.strip():
         user += f"<istilah>\n{filters.Redactor(cfg.get('redact'), filters.split_words(cfg.get('sensitive_words', ''))).apply(vocabulary)}\n</istilah>\n\n"
     user += f"<transkrip>\n{send['transcript']}\n</transkrip>"
-    raw = call(CLAUDE_SYSTEM, user, api_key, model, 4000)
+    raw = call(CLAUDE_SYSTEM, user, api_key, model, SUGGEST_MAX_TOKENS)
     if on_reply:
         on_reply()
+    reply = {"raw": raw, "complete": True, "received": 0, "dropped": 0}
+    parsed, reply["complete"] = parse_claude(raw)
+    if not parsed and not reply["complete"]:
+        raise SuggestReplyError(tr("sug_reply_cut_empty"), raw)
+    reply["received"] = len(parsed)
     by_id = {s["id"]: s for s in version.get("segments", [])}
     out = []
-    for d in parse_claude(raw):
+    for d in parsed:
         sid = str(d.get("id", ""))
         seg = by_id.get(sid)
         if not seg or seg.get("secret"):
+            reply["dropped"] += 1
             continue
         frm = filters.restore(str(d.get("from", "")), send["tokens"])
         to = filters.restore(str(d.get("to", "")), send["tokens"])
         if not frm or frm == to or frm not in seg["text"] or filters.TOKEN_RE.search(to):
+            reply["dropped"] += 1
             continue
         out.append({"seg_id": sid, "from": frm, "to": to, "kind": "claude",
                     "reason": str(d.get("reason", ""))[:200]})
-    return out, send
+    return out, send, reply

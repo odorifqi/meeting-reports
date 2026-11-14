@@ -1,3 +1,5 @@
+import pytest
+
 import filters
 import suggest
 
@@ -84,7 +86,8 @@ def test_claude_suggestions_restore_and_validate():
                 '{"id":"s00001","from":"cabang","to":"Cabang","reason":"kapital"},'
                 '{"id":"s00002","from":"rahasia","to":"x"},'
                 '{"id":"s00001","from":"tidak ada","to":"y"}]')
-    items, send = suggest.claude_suggestions(meta, ver, {}, "k", "m", call=fake)
+    items, send, reply = suggest.claude_suggestions(meta, ver, {}, "k", "m", call=fake)
+    assert reply["complete"] and reply["received"] == 4 and reply["dropped"] == 2
     assert "0331" not in sent["user"]
     assert [(i["from"], i["to"]) for i in items] == [("rek 0331 0100 0412", "rekening 0331 0100 0412"),
                                                      ("cabang", "Cabang")]
@@ -105,3 +108,34 @@ def test_english_tokens_and_singular_segment():
     assert "- Sari | – | 1 segment\n" in head and "- Andi | – | 2 segments" in head
     head_id = filters.build_send(meta, ver, {"redact": None, "sensitive_words": ""})["header"]
     assert "- Sari | – | 1 segmen\n" in head_id
+
+
+def test_parse_claude_cut_off_and_unreadable():
+    items, complete = suggest.parse_claude('```json\n[{"id":"s1","from":"a","to":"b"}]\n```')
+    assert complete and items == [{"id": "s1", "from": "a", "to": "b"}]
+    # cut by the token limit: the whole objects are kept
+    items, complete = suggest.parse_claude('[{"id":"s1","from":"a","to":"b"},{"id":"s2","from":"c","to"')
+    assert not complete and items == [{"id": "s1", "from": "a", "to": "b"}]
+    # a note with a bracket before the list does not hide the list
+    items, complete = suggest.parse_claude('Segmen [s1] diperiksa.\n[{"id":"s1","from":"a","to":"b"}]')
+    assert complete and len(items) == 1
+    assert suggest.parse_claude("[]") == ([], True)
+    for bad in ("Tidak ada saran.", "[ini bukan json]"):
+        with pytest.raises(suggest.SuggestReplyError):
+            suggest.parse_claude(bad)
+
+
+def test_claude_suggestions_cut_off():
+    meta = {"title": "Rapat"}
+    ver = {"segments": [{"id": "s00001", "start": 0, "end": 1, "text": "bar reskrim memanggil"}], "participants": []}
+    asked = {}
+
+    def cut(system, user, key, model, max_tokens):
+        asked["max"] = max_tokens
+        return '[{"id":"s00001","from":"bar reskrim","to":"Bareskrim","reason":"nama lembaga"},{"id":"s000'
+    items, _, reply = suggest.claude_suggestions(meta, ver, {}, "k", "m", call=cut)
+    assert asked["max"] == suggest.SUGGEST_MAX_TOKENS >= 16000
+    assert [(i["from"], i["to"]) for i in items] == [("bar reskrim", "Bareskrim")] and not reply["complete"]
+    with pytest.raises(suggest.SuggestReplyError) as e:
+        suggest.claude_suggestions(meta, ver, {}, "k", "m", call=lambda *a: '[{"id":"s00001","fr')
+    assert e.value.raw.startswith("[{")

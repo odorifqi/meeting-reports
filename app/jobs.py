@@ -458,14 +458,23 @@ class Jobs:
             if not key:
                 raise RuntimeError(tr("key_missing_open_settings", provider=pname))
             vocab = (m.get("settings") or {}).get("vocabulary", "") or cfg.get("vocabulary", "")
-            items, send = suggest.claude_suggestions(m, v, cfg, key, model, vocab, call=self.claude, send=send,
-                                                     on_reply=lambda: step(phase="match"))
+            reply_file = st.path(mid) / "saran-claude-reply.json"
+            try:
+                items, send, reply = suggest.claude_suggestions(m, v, cfg, key, model, vocab, call=self.claude,
+                                                                send=send, on_reply=lambda: step(phase="match"))
+            except suggest.SuggestReplyError as exc:
+                store_mod._write_json(reply_file, {"at": store_mod.now_iso(), "provider": provider, "model": model,
+                                                   "error": str(exc), "raw": exc.raw})
+                raise
+            store_mod._write_json(reply_file, {"at": store_mod.now_iso(), "provider": provider, "model": model,
+                                               **reply})
             st.log_send(mid, {"kind": "suggest", "provider": provider, "model": model, "words": send["words"], "masked": send["masked"],
                               "withheld": send["withheld"], "rev": m.get("transcript_rev")})
             store_mod._write_json(st.path(mid) / "saran-claude.json",
                                   {"at": store_mod.now_iso(), "based_on_rev": m.get("transcript_rev"),
                                    "provider": provider, "model": model, "items": items})
-            step(state="ready", phase=None, count=len(items), at=store_mod.now_iso())
+            step(state="ready", phase=None, count=len(items), partial=not reply["complete"],
+                 at=store_mod.now_iso())
         except Exception as exc:  # noqa: BLE001
             step(state="failed", phase=None, error=_friendly(exc, pname))
 
