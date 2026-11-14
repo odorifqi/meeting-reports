@@ -238,3 +238,13 @@ tests/           pytest
 ```
 
 </details>
+
+## License
+
+Copyright (C) 2026 Muhammad Rifqi (odorifqi)
+
+Meeting Report is free software. You can use, study, change and share it under the terms of the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
+
+If you share a changed version, or let other people use it over a network, you must also share its full source code under the same license.
+
+Meeting Report comes with no warranty. The third-party components and their licenses are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
